@@ -21,20 +21,19 @@ remote positions, the placed pose and the next-update readback error.
   digests permit offline guessing. Do not publish or port-forward the relay.
 
 The worker authenticates with `HELLO`/`VER`/`AUTH`/`WELCOME` and sends `MTX`
-at up to 10 Hz. The optional trailing integer carries the sender's locomotion
-state (101–111 in order: idle, walk, run, sprint, jump, fall, climb, climb idle,
-swim, swim idle, glide; 0 means unavailable). The relay forwards it unchanged.
-The sender reads Link's own animation sequence for special movement states and
-uses horizontal speed for the ground gaits. The receiver plays the state at
-its interpolated pose time, changing clips only on transitions. Missing or
-unknown states still place the ghost and play idle. The worker never accesses
-guest memory; it transfers copied poses and states via bounded queues.
+with the optional 101–111 locomotion state (0 means unavailable). On BOTW 1.9.0
+it appends the active clip key and source frame at up to 20 Hz for idle, ground
+movement, turning, jumping, falling and landing. The key names a skeletal
+leaf in Link's actual animation graph, including start and stop clips. The
+ghost and its worn pieces seek to the same phase at their buffered pose time.
+Outside these sequences, or when a clip is missing, the receiver uses the
+coarse state. The worker never reads guest memory.
 
-The animation bridge is optional and version-pinned to BOTW 1.9.0. Rebuild
-an existing idle-only overlay with `python tools/coop_ghost_assets.py`.
-The new sequences use locally installed Link clips; never share the overlay.
-Climb, swim and glide use representative clips, not the full player animation
-blend graph or a visible paraglider.
+Rebuild the overlay with `python tools/coop_ghost_assets.py` and use the
+updated relay and both updated clients. The tool generates the clip aliases
+from the local RomFS and disables only the ghost NPC's automatic name label.
+Never share the overlay. The strongest skeletal clip is mirrored, not the
+full blend of simultaneous clips, secondary layers or foot IK.
 
 To watch two instances on one PC (each with copies of the save and settings,
 windowed at 960x540), build the overlay once and run

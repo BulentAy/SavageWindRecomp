@@ -16,13 +16,17 @@ MAX_CLIENTS = 16
 MAX_PENDING = 16 * 1024
 DECIMAL = re.compile(rb"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
 INTEGER = re.compile(rb"[+-]?[0-9]+")
+CLIP = re.compile(rb"[A-Za-z0-9_]{1,63}")
 
 
 def matrix(fields):
-    if len(fields) not in (12, 13) or not all(DECIMAL.fullmatch(f) for f in fields[:12]):
+    if len(fields) not in (12, 13, 15) or not all(DECIMAL.fullmatch(f) for f in fields[:12]):
         return False
-    if len(fields) == 13 and (not INTEGER.fullmatch(fields[12]) or
+    if len(fields) >= 13 and (not INTEGER.fullmatch(fields[12]) or
                               not -(2**31) <= int(fields[12]) < 2**31):
+        return False
+    if len(fields) == 15 and (not CLIP.fullmatch(fields[13]) or not DECIMAL.fullmatch(fields[14]) or
+                              not 0 <= float(fields[14]) <= 10000):
         return False
     m = [float(f) for f in fields[:12]]
     if not all(abs(x) <= (100000 if i % 4 == 3 else 1.1) for i, x in enumerate(m)):

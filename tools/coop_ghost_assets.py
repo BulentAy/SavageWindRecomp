@@ -438,7 +438,25 @@ def single_clip(aslist, clip):
     return anim.write()
 
 
-def build_pack(donor, look, name, look_name=LOOK, anim=None):
+def player_clips(files):
+    clips = {}
+    player = Aamp(files['Actor/ASList/Player.baslist'])
+    defines = next(l for l in player.root[1] if l[0] == crc('ASDefines'))
+    for _, params in defines[2]:
+        entry = {p[0]: p[2] for p in params}
+        seq = entry[crc('Name')]
+        if seq not in ('Wait', 'Move', 'Turn', 'Jump', 'Fall', 'Land'):
+            continue
+        resource = Aamp(files['Actor/AS/%s.bas' % entry[crc('Filename')]])
+        elements = next(l for l in resource.root[1] if l[0] == crc('Elements'))
+        for i, node in enumerate(elements[1]):
+            p = {p[0]: p[2] for o in node[2] if o[0] == crc('Parameters') for p in o[1]}
+            if p.get(crc('TypeIndex')) == struct.pack('<i', 67) and p.get(crc('FileName')):
+                clips['CoopClip_%s_%d' % (seq, i)] = p[crc('FileName')]
+    return clips
+
+
+def build_pack(donor, look, name, look_name=LOOK, anim=None, clips=None):
     """The new pack's files and, for each file new to the game, (path, the game file whose size entry it starts
     from, that file's length, the new length). With anim = (ASList name, its files) the actor plays those
     sequences instead of a list derived from look's (a worn piece)."""
@@ -460,11 +478,21 @@ def build_pack(donor, look, name, look_name=LOOK, anim=None):
         users[key][2] = theirs[key][2]
     for key in DUMMY:
         users[key][2] = 'Dummy'
+    # Keep the monk's behaviour without making its NPC auto-label visible on the ghost.
+    gp_path = 'Actor/GeneralParamList/%s.bgparamlist' % users['GParamUser'][2]
+    gp = Aamp(files[gp_path][1])
+    label = next((p for o in gp.objects() if o[0] == crc('Npc') for p in o[1] if p[0] == crc('UseAutoLabel')), None)
+    if label is None or label[1] != 0:
+        raise ValueError('donor GParamList has no NPC UseAutoLabel flag')
+    label[2] = bytes(4)
+    users['GParamUser'][2] = name
+    gp_out = ('Actor/GeneralParamList/%s.bgparamlist' % name, gp.write(), files[gp_path][2])
+    gp_size = (gp_out[0], gp_path, len(files[gp_path][1]), len(gp_out[1]))
     if anim:
         users['ASUser'][2] = anim[0]
         new = ('Actor/ActorLink/%s.bxml' % name, link.write(), files[donor_link][2])
-        return [f for n, f in files.items() if n not in links] + anim[1] + [new], \
-            [(new[0], donor_link, len(files[donor_link][1]), len(new[1]))]
+        return [f for n, f in files.items() if n not in links] + anim[1] + [new, gp_out], \
+            [(new[0], donor_link, len(files[donor_link][1]), len(new[1])), gp_size]
     # the menu Link has no sequence the monk's AI asks for: its own list under the ghost's name gets one
     look_as = 'Actor/ASList/%s.baslist' % theirs['ASUser'][2]
     idle_as = 'Actor/AS/%s.bas' % IDLE_AS
@@ -474,16 +502,16 @@ def build_pack(donor, look, name, look_name=LOOK, anim=None):
     users['ASUser'][2] = name
     out = [f for n, f in files.items() if n not in links]
     out.append(('Actor/ActorLink/%s.bxml' % name, link.write(), files[donor_link][2]))
-    clips = []
-    for seq, clip in LOCOMOTION.items():
+    recordings = []
+    for seq, clip in (LOCOMOTION | (clips or {})).items():
         filename = name + '_' + seq
         add_sequence(aslist, seq, filename)
-        clips.append(('Actor/AS/%s.bas' % filename, single_clip(aslist, clip), files[idle_as][2]))
+        recordings.append(('Actor/AS/%s.bas' % filename, single_clip(aslist, clip), files[idle_as][2]))
     out.append(('Actor/ASList/%s.baslist' % name, aslist.write(), files[look_as][2]))
     derived = [(n, src, len(files[src][1]), len(d)) for (n, d, _), src in zip(out[-2:], (donor_link, look_as))]
     # The single-clip resource needs its own size entry; use the game's animation parser overhead.
-    derived += [(n, idle_as, len(files[idle_as][1]), len(d)) for n, d, _ in clips]
-    return out + clips, derived
+    derived += [(n, idle_as, len(files[idle_as][1]), len(d)) for n, d, _ in recordings]
+    return out + recordings + [gp_out], derived + [gp_size]
 
 
 def build_actor_info(info, name, look_name=LOOK):
@@ -523,7 +551,9 @@ def build(romfs, out_dir, name):
     rstb_rel = 'System/Resource/ResourceSizeTable.product.srsizetable'
     donor_z = read(pack_rel % DONOR)
     donor, look = yaz0_decompress(donor_z), yaz0_decompress(read(pack_rel % LOOK))
-    files, derived = build_pack(donor, look, name)
+    title = dict((n, b) for n, b, _ in sarc_read(read('Pack/TitleBG.pack')))
+    player = {n: b for n, b, _ in sarc_read(yaz0_decompress(title[pack_rel % 'GameROMPlayer']))}
+    files, derived = build_pack(donor, look, name, clips=player_clips(player))
     packs = {name: sarc_write(files)}
     anim = (name, [f for f in files if f[0].startswith(('Actor/ASList/%s.' % name, 'Actor/AS/%s_' % name))])
     for key, piece in PIECES.items():

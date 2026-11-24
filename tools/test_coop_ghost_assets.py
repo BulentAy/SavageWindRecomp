@@ -37,7 +37,14 @@ def actor_link(scale=1.0, **users):
     return a.write()
 
 
-USERS = ('ModelUser', 'ASUser', 'AIProgramUser') + g.DUMMY
+def npc_params():
+    a = g.Aamp.__new__(g.Aamp)
+    a.flags, a.pio_version, a.doc_type = 3, 0, b'xml'
+    a.root = [g.crc('param_root'), [], [[g.crc('Npc'), [param('UseAutoLabel', 0, struct.pack('<I', 1))]]]]
+    return a.write()
+
+
+USERS = ('ModelUser', 'ASUser', 'AIProgramUser', 'GParamUser') + g.DUMMY
 
 
 def make_romfs(root):
@@ -50,6 +57,7 @@ def make_romfs(root):
     donor = g.sarc_write([
         ('Actor/ActorLink/%s.bxml' % g.DONOR, actor_link(1.5, **{u: 'Monk' + u for u in USERS}), 4),
         ('Actor/AIProgram/Wait.baiprog', b'AI' * 10, 8),
+        ('Actor/GeneralParamList/MonkGParamUser.bgparamlist', npc_params(), 4),
         ('Actor/Shared.bin', b'monk', 4)])
     look = g.sarc_write([
         ('Actor/ActorLink/%s.bxml' % g.LOOK, actor_link(**{u: 'Menu' + u for u in USERS}), 8),
@@ -57,6 +65,8 @@ def make_romfs(root):
         ('Actor/ASList/MenuASUser.baslist', as_list('Alpha', 'Zulu'), 4),
         ('Actor/AS/%s.bas' % g.IDLE_AS, b'AS', 4),
         ('Actor/Shared.bin', b'menu', 4)])
+    player = g.sarc_write([('Actor/ASList/Player.baslist', as_list(), 4)])
+    put('Pack/TitleBG.pack', g.sarc_write([('Actor/Pack/GameROMPlayer.sbactorpack', g.yaz0_literal(player), 4)]))
     put('Actor/Pack/%s.sbactorpack' % g.DONOR, g.yaz0_literal(donor))
     put('Actor/Pack/%s.sbactorpack' % g.LOOK, g.yaz0_literal(look))
     for piece in g.PIECES.values():
@@ -73,6 +83,7 @@ def make_romfs(root):
     t.set('Actor/Pack/%s.bactorpack' % g.DONOR, 5000)
     t.set('Actor/ActorLink/%s.bxml' % g.DONOR, 1000)
     t.set('Actor/ASList/MenuASUser.baslist', 2000)
+    t.set('Actor/GeneralParamList/MonkGParamUser.bgparamlist', 1000)
     t.set('Actor/AS/%s.bas' % g.IDLE_AS, 256)
     t.names['Some/Collided.name'] = 7
     put('System/Resource/ResourceSizeTable.product.srsizetable', g.yaz0_literal(t.write()))
@@ -161,6 +172,9 @@ class Build(unittest.TestCase):
         users = {k: v[2] for k, v in g.link_target(g.Aamp(pack['Actor/ActorLink/Ghost.bxml'])).items()}
         self.assertEqual(users['ModelUser'], 'MenuModelUser')
         self.assertEqual(users['ASUser'], 'Ghost')
+        params = g.Aamp(pack['Actor/GeneralParamList/%s.bgparamlist' % users['GParamUser']])
+        self.assertEqual(next(p[2] for o in params.objects() if o[0] == g.crc('Npc')
+                              for p in o[1] if p[0] == g.crc('UseAutoLabel')), bytes(4))
         seqs = [[p[2] for p in o[1]] for o in g.Aamp(pack['Actor/ASList/Ghost.baslist']).objects()]
         self.assertEqual([s for s in seqs if not s[0].startswith('Coop')],
                          [['Alpha', 'FileAlpha'], ['Wait', 'Ghost_Wait'], ['Zulu', 'FileZulu']])
@@ -199,6 +213,18 @@ class Build(unittest.TestCase):
             self.assertEqual((entry['bfres'], entry['instSize']), (piece, g.INST_SIZE))
             self.assertGreaterEqual(t.get('Actor/Pack/Ghost%s.bactorpack' % key), 64 << 10)
             self.assertGreaterEqual(t.get('Actor/ActorLink/Ghost%s.bxml' % key), 1000)
+
+    def test_ghost_keeps_ids_of_actual_transition_clips(self):
+        # Element index, not rank among the skeletal elements, is the engine's key.
+        a = g.Aamp(as_list('Move', 'Wait'))
+        start = g.Aamp(g.single_clip(a, 'WalkStart'))
+        start.root[1][0][1][0][0] = g.crc('Element1')
+        start.root[1][0][1].insert(0, [g.crc('Element0'), [], [
+            [g.crc('Parameters'), [param('TypeIndex', 2, struct.pack('<i', 41))]]]])
+        stop = g.single_clip(a, 'WalkStop')
+        files = {'Actor/ASList/Player.baslist': a.write(), 'Actor/AS/FileMove.bas': start.write(),
+                 'Actor/AS/FileWait.bas': stop}
+        self.assertEqual(g.player_clips(files), {'CoopClip_Move_1': 'WalkStart', 'CoopClip_Wait_0': 'WalkStop'})
 
     def test_ghost_aslist_contains_playable_locomotion(self):
         self.assertEqual(g.main(['--romfs', self.romfs, '--out', self.out]), 0)

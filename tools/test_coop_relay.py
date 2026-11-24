@@ -82,6 +82,18 @@ class RelayTest(unittest.TestCase):
                     ack.readline()
             self.assertEqual(rx.readline(), b"BYE " + aid + b"\n")
 
+    def test_clip_and_frame_are_forwarded_only_within_bounds(self):
+        with relay() as port, peer(port) as (b, rx, _, bnonce), peer(port) as (a, ack, aid, anonce):
+            b.sendall(auth(bnonce))
+            a.sendall(auth(anonce))
+            self.assertEqual(rx.readline(), b"WELCOME\n")
+            self.assertEqual(ack.readline(), b"WELCOME\n")
+            for bad in (b" 102 ../../bad 2", b" 102 Start NaN", b" 102 Start -1", b" 102 Start 10001"):
+                a.sendall(b"MTX " + MTX + bad + b"\n")
+            for suffix in (b" 102 Start 2.5", b" 102 Loop 6", b" 101 Stop 1.5"):
+                a.sendall(b"MTX " + MTX + suffix + b"\n")
+                self.assertEqual(rx.readline(), b"MTX " + aid + b" " + MTX + suffix + b"\n")
+
     def test_invalid_matrices_are_not_forwarded(self):
         with relay() as port, peer(port) as (b, rx, _, bnonce), peer(port) as (a, ack, aid, anonce):
             b.sendall(auth(bnonce))

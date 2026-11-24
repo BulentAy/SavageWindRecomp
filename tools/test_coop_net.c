@@ -78,6 +78,9 @@ int main(int argc, char **argv) {
                     pose(expected, other, sample);
                     assert(sample > last && !memcmp(expected, event.m, sizeof expected));
                     assert((int)event.anim == 101 + sample % 11);
+                    char clip[64];
+                    snprintf(clip, sizeof clip, "CoopClip_Move_%d", sample % 3);
+                    assert(!strcmp(event.clip.name, clip) && event.clip.frame == (float)sample + 0.5f);
                     last = sample;
                     if (++received == goal) {
                         unsigned tx, rx;
@@ -90,11 +93,13 @@ int main(int argc, char **argv) {
             if (tick % 12 == 0 && coop_net_connected()) {
                 float matrix[12];
                 pose(matrix, me, ++seq);
-                assert(coop_net_push(matrix, 101 + seq % 11));
+                CoopClip clip = {.frame = (float)seq + 0.5f};
+                snprintf(clip.name, sizeof clip.name, "CoopClip_Move_%d", seq % 3);
+                assert(coop_net_push(matrix, 101 + seq % 11, &clip));
             }
             if (round == 2 && received >= goal && seq >= 12) {
                 coop_net_stop();
-                assert(!coop_net_connected() && !coop_net_push((float[12]){0}, 0));
+                assert(!coop_net_connected() && !coop_net_push((float[12]){0}, 0, NULL));
                 assert(coop_net_start());
                 assert(!coop_net_pop(&event));
                 coop_net_stop();

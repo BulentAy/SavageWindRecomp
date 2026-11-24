@@ -47,7 +47,7 @@ static struct {
     float origin[3], target[3];
 } local;
 
-enum { SAMPLES = 8, DELAY_MS = 120, MIN_GAP_MS = 50, STALE_MS = 2000, RANGE_M = 120, MAX_SPAWNS = 8, LOG_EVERY = 6 };
+enum { SAMPLES = 8, DELAY_MS = 120, MIN_GAP_MS = 25, STALE_MS = 2000, RANGE_M = 120, MAX_SPAWNS = 8, LOG_EVERY = 6 };
 enum Ghost { GHOST_NONE, GHOST_PENDING, GHOST_ALIVE };
 // The ghost's worn pieces (tools/coop_ghost_assets.py PIECES): optional actors placed and animated with it.
 enum { PIECES = 3 };
@@ -57,7 +57,7 @@ static const char *const sequences[] = {
     "CoopSwim", "CoopSwimWait", "CoopGlide",
 };
 _Static_assert(sizeof sequences / sizeof *sequences == COOP_ANIM_GLIDE - COOP_ANIM_IDLE + 1, "locomotion table");
-static struct { uint64_t vtable, data; char name[16]; } *as_names;
+static struct { uint64_t vtable, data; char name[64]; } *as_name;
 // The AS hook can run on a different guest thread. Publish the actor and its state together.
 static _Atomic uint64_t observed_as;
 static bool anim_bridge;
@@ -65,17 +65,18 @@ static struct {
     float x, z, speed;
     double ms;
     CoopAnim last;
+    char last_clip[64];
 } gait;
 static struct {
     uint32_t peer;
     unsigned n, spawns, updates;
     double last_ms;  // newest pose, game-thread receive time
-    struct { double ms; CoopAnim anim; float m[12]; } ring[SAMPLES];  // oldest first
+    struct { double ms; CoopAnim anim; CoopClip clip; float m[12]; } ring[SAMPLES];  // oldest first
     enum Ghost state;
-    CoopAnim playing;
+    char playing[64];
     bool gone, wrote;
     uint64_t link, creator, actor, deadline;
-    struct { uint64_t actor; CoopAnim playing; bool off; } piece[PIECES];
+    struct { uint64_t actor; char playing[64]; bool off; } piece[PIECES];
     unsigned pending;  // 1 + the piece whose creation is pending, 0 none
     uint64_t piece_deadline;
     float put[12], err_max, link_at_spawn[3];
@@ -90,7 +91,7 @@ int g_coop_local;  // 1: local test, 2: network ghost (patches.py _vfr_ratio cal
 RT_ON_RESET(coop_reset) {
     g_coop_local = 0;
     scratch = NULL;
-    as_names = NULL;
+    as_name = NULL;
     anim_bridge = false;
     atomic_store(&observed_as, 0);
     memset(&gait, 0, sizeof gait);
@@ -321,30 +322,120 @@ static CoopAnim local_anim(uint64_t link, const float m[12]) {
     return anim;
 }
 
-// The ghost and its pieces play the same sequence, started in the same update so their clips stay in step.
-static void animate(Cpu *c, CoopAnim anim) {
+// BOTW 1.9.0: bank 0, track 0 owns the body graph; its cells point to the live frame controllers.
+typedef struct { uint32_t n, pad; uint64_t data; } AsTable;
+typedef struct { uint8_t child, frame, blend, flags; float weight, blend_factor; } AsCell;
+typedef struct { uint32_t flags; float current, previous, rate, first, end; } AsFrame;
+_Static_assert(sizeof(AsTable) == 16 && sizeof(AsCell) == 12 && sizeof(AsFrame) == 24, "AS ABI");
+
+static uint64_t as_track(uint64_t as) {
+    uint64_t banks = as ? read_ptr(as + 0xc0) : 0;
+    return banks ? read_ptr(banks + 0x28) : 0;
+}
+
+static bool as_sequence(uint64_t track, char *name, size_t size) {
+    uint64_t owner = track ? read_ptr(track) : 0, text;
+    // AS names can point into the packed string table, not an aligned object.
+    return owner && control_mem_peek(owner + 0x10, &text, sizeof text) &&
+        control_mem_peek(text, name, size) && memchr(name, 0, size);
+}
+
+static bool as_tables(uint64_t track, AsTable table[3]) {
+    uint64_t owner = track ? read_ptr(track) : 0;
+    uint64_t ctx = owner ? read_ptr(owner + 0xd0) : 0;
+    return ctx && control_mem_peek(ctx, table, 3 * sizeof *table) &&
+        table[0].n <= 255 && table[1].n <= 255 && table[2].n <= 512 &&
+        ptr(table[0].data) && ptr(table[1].data) && ptr(table[2].data);
+}
+
+static uint64_t as_frame(const AsTable table[3], const AsCell *cell) {
+    return (cell->flags & 9) == 9 && cell->frame < table[1].n ? table[1].data + 32 * cell->frame : 0;
+}
+
+static CoopClip local_clip(uint64_t link) {
+    CoopClip clip = {0};
+    if (!anim_bridge) return clip;
+    uint64_t track = as_track(read_ptr(link + 0x560));
+    char seq[32];
+    if (!as_sequence(track, seq, sizeof seq) ||
+        (strcmp(seq, "Wait") && strcmp(seq, "Move") && strcmp(seq, "Turn") &&
+         strcmp(seq, "Jump") && strcmp(seq, "Fall") && strcmp(seq, "Land"))) return clip;
+    AsTable table[3];
+    uint8_t map[512];
+    AsCell cells[255];
+    if (!as_tables(track, table) || !control_mem_peek(table[2].data, map, table[2].n) ||
+        !control_mem_peek(table[0].data, cells, table[0].n * sizeof *cells)) return clip;
+    // shortcut: the strongest evaluated skeletal leaf, stream joint poses for exact multi-clip blends and IK.
+    float weight = 0;
+    for (unsigned i = 0; i < table[2].n; i++) {
+        if (map[i] >= table[0].n) continue;
+        const AsCell *cell = &cells[map[i]];
+        if (!(cell->weight > weight && cell->weight <= 1.001f)) continue;
+        uint64_t addr = as_frame(table, cell);
+        AsFrame frame;
+        if (!addr || !control_mem_peek(addr, &frame, sizeof frame) || !(frame.current >= 0 && frame.current <= 10000))
+            continue;
+        snprintf(clip.name, sizeof clip.name, "CoopClip_%s_%u", seq, i);
+        clip.frame = frame.current;
+        weight = cell->weight;
+    }
+    return clip;
+}
+
+static void seek_clip(uint64_t as, const CoopClip *clip) {
+    uint64_t track = as_track(as);
+    char active[64];
+    AsTable table[3];
+    uint8_t index;
+    AsCell cell;
+    AsFrame frame;
+    if (!as_sequence(track, active, sizeof active) || strcmp(active, clip->name) || !as_tables(track, table) ||
+        !table[2].n || !control_mem_peek(table[2].data, &index, sizeof index) || index >= table[0].n ||
+        !control_mem_peek(table[0].data + index * sizeof cell, &cell, sizeof cell)) return;
+    uint64_t addr = as_frame(table, &cell);
+    if (!addr || !control_mem_peek(addr, &frame, sizeof frame) ||
+        !(frame.first >= 0 && frame.first <= frame.end && frame.end <= 10000)) return;
+    float at = fminf(frame.end, fmaxf(frame.first, clip->frame));
+    control_mem_poke(addr + offsetof(AsFrame, current), (float[]){at, at}, 2 * sizeof at);
+}
+
+// The ghost and all worn pieces use the same sampled clip and phase.
+static void animate(Cpu *c, CoopAnim anim, const CoopClip *clip) {
     if (!anim_bridge || strcmp(test_actor, "CoopPlayer")) return;
-    if (!anim) anim = COOP_ANIM_IDLE;
-    int i = anim - COOP_ANIM_IDLE;
-    if (!as_names) {
+    const char *fallback = sequences[(anim ? anim : COOP_ANIM_IDLE) - COOP_ANIM_IDLE];
+    bool exact = !strncmp(clip->name, "CoopClip_", 9);
+    const char *name = exact ? clip->name : fallback;
+    if (!as_name) {
         uint64_t vt = read_ptr(g_site.coop_string_vtable_slot);
         if (!vt) return;
-        as_names = hle_alloc(sizeof *as_names * (sizeof sequences / sizeof *sequences));
-        for (unsigned j = 0; j < sizeof sequences / sizeof *sequences; j++) {
-            as_names[j].vtable = vt + 0x10;
-            as_names[j].data = (uintptr_t)as_names[j].name;
-            snprintf(as_names[j].name, sizeof as_names[j].name, "%s", sequences[j]);
-        }
+        as_name = hle_alloc(sizeof *as_name);
+        as_name->vtable = vt + 0x10;
+        as_name->data = (uintptr_t)as_name->name;
     }
     for (int p = -1; p < PIECES; p++) {
         uint64_t actor = p < 0 ? ghost.actor : ghost.piece[p].actor;
-        CoopAnim *playing = p < 0 ? &ghost.playing : &ghost.piece[p].playing;
+        char *playing = p < 0 ? ghost.playing : ghost.piece[p].playing;
         uint64_t as = actor ? read_ptr(actor + 0x560) : 0;
-        if (!as || *playing == anim) continue;
-        uint64_t result, args[] = {as, (uintptr_t)&as_names[i], UINT32_MAX, UINT32_MAX, 1};
-        if (!call(c, "playAS", g_site.coop_play_as, args, 5, &result)) return;
-        *playing = anim;
-        if (p < 0) LOG("[coop] ANIM RX peer=%u state=%d %s\n", ghost.peer, anim, sequences[i]);
+        if (!as) continue;
+        if (strcmp(playing, name)) {
+            uint64_t result, args[] = {as, (uintptr_t)as_name, UINT32_MAX, UINT32_MAX, 1};
+            strcpy(as_name->name, name);
+            if (!call(c, "playAS", g_site.coop_play_as, args, 5, &result)) return;
+            if (exact) {
+                char active[64] = {0};
+                if (!as_sequence(as_track(as), active, sizeof active) || strcmp(active, name)) {
+                    if (p < 0) LOG("[coop] CLIP MISS %s\n", name);
+                    strcpy(as_name->name, fallback);
+                    if (!call(c, "playAS", g_site.coop_play_as, args, 5, &result)) return;
+                } else if (p < 0) {
+                    LOG("[coop] CLIP RX t=%.1f peer=%u %s frame=%.2f\n", now_ms(), ghost.peer, name, clip->frame);
+                }
+            } else if (p < 0) {
+                LOG("[coop] ANIM RX peer=%u state=%d %s\n", ghost.peer, anim ? anim : COOP_ANIM_IDLE, name);
+            }
+            strcpy(playing, name);
+        }
+        if (exact) seek_clip(as, clip);
     }
 }
 
@@ -355,7 +446,7 @@ static void forget_ghost(const char *why) {
     ghost.state = GHOST_NONE;  // (a pending handle's scratch is abandoned, never reused)
     ghost.actor = ghost.creator = 0;
     ghost.wrote = false;
-    ghost.playing = COOP_ANIM_NONE;
+    ghost.playing[0] = 0;
     memset(ghost.piece, 0, sizeof ghost.piece);
     ghost.pending = 0;
 }
@@ -388,8 +479,10 @@ static void spawn_pieces(Cpu *c, uint64_t creator, uint64_t frame, const float a
             return;
         }
         ghost.piece[p].actor = actor;
-        ghost.playing = COOP_ANIM_NONE;  // restart every clip together with the new piece's
-        for (int q = 0; q < PIECES; q++) ghost.piece[q].playing = COOP_ANIM_NONE;
+        if (strncmp(ghost.playing, "CoopClip_", 9)) {  // legacy clips have no shared frame to seek to
+            ghost.playing[0] = 0;
+            for (int q = 0; q < PIECES; q++) ghost.piece[q].playing[0] = 0;
+        }
         LOG("[coop] PIECE ALIVE update=%llu %s\n", (unsigned long long)frame, piece_name(p));
         return;
     }
@@ -420,10 +513,11 @@ static void drain(void) {
         }
         if (ghost.gone) ghost.n = 0;  // (a returning peer starts a fresh history)
         if (ghost.n == SAMPLES) memmove(ghost.ring, ghost.ring + 1, --ghost.n * sizeof *ghost.ring);
-        // Poses sent 100 ms apart can arrive in one batch: space their stamps so the blend never jumps a whole sample.
+        // Batched arrivals need distinct receive stamps so interpolation can traverse their samples.
         double ms = ghost.n ? fmax(now, ghost.ring[ghost.n - 1].ms + MIN_GAP_MS) : now;
         ghost.ring[ghost.n].ms = fmin(ms, now + DELAY_MS / 2);
         ghost.ring[ghost.n].anim = e.anim;
+        ghost.ring[ghost.n].clip = e.clip;
         memcpy(ghost.ring[ghost.n++].m, e.m, sizeof e.m);
         ghost.last_ms = now;
         ghost.gone = false;
@@ -454,19 +548,24 @@ static bool blend_rotation(float out[12], const float *p, const float *q, double
     return true;
 }
 
-static CoopAnim target_pose(float out[12]) {
+static CoopAnim target_pose(float out[12], CoopClip *clip) {
     double t = now_ms() - DELAY_MS;
     memcpy(out, ghost.ring[ghost.n - 1].m, 12 * sizeof *out);
     unsigned i = ghost.n - 1;
     while (i && ghost.ring[i - 1].ms > t) i--;
     if (!i || ghost.ring[i].ms <= t) {
         memcpy(out, ghost.ring[i].m, 12 * sizeof *out);
+        *clip = ghost.ring[i].clip;
         return ghost.ring[i].anim;
     }
     double a = ghost.ring[i - 1].ms, b = ghost.ring[i].ms, f = b > a ? (t - a) / (b - a) : 1;
     if (!blend_rotation(out, ghost.ring[i - 1].m, ghost.ring[i].m, f)) memcpy(out, ghost.ring[i].m, 12 * sizeof *out);
     for (int k = 3; k < 12; k += 4)
         out[k] = (float)(ghost.ring[i - 1].m[k] + f * (ghost.ring[i].m[k] - ghost.ring[i - 1].m[k]));
+    *clip = ghost.ring[i - 1].clip;
+    const CoopClip *next = &ghost.ring[i].clip;
+    if (clip->name[0] && !strcmp(clip->name, next->name) && next->frame >= clip->frame)
+        clip->frame += (float)f * (next->frame - clip->frame);
     return ghost.ring[i - 1].anim;
 }
 
@@ -487,7 +586,13 @@ static void net_update(Cpu *c) {
     if (!actor_calc(link) || !pose(link, m)) return;
     if (link != ghost.link) { forget_ghost("Link changed"); ghost.link = link; gait.ms = 0; }
     float xyz[3] = {m[3], m[7], m[11]};
-    coop_net_push(m, local_anim(link, m));
+    CoopAnim anim = local_anim(link, m);
+    CoopClip clip = local_clip(link);
+    if (strcmp(gait.last_clip, clip.name)) {
+        if (clip.name[0]) LOG("[coop] CLIP TX t=%.1f %s frame=%.2f\n", now_ms(), clip.name, clip.frame);
+        strcpy(gait.last_clip, clip.name);
+    }
+    coop_net_push(m, anim, &clip);
     uint64_t creator = read_ptr(g_site.coop_actor_creator);
     if (ghost.state != GHOST_NONE && creator != ghost.creator) { forget_ghost("ActorCreator changed"); return; }
     bool log = ++ghost.updates % LOG_EVERY == 0;
@@ -540,7 +645,7 @@ static void net_update(Cpu *c) {
         return;
     }
     float want[12];
-    CoopAnim anim = target_pose(want);
+    anim = target_pose(want, &clip);
     float at[3] = {want[3], want[7], want[11]};
     if (ghost.state == GHOST_NONE) {
         uint64_t mgr = read_ptr(g_site.coop_heap_mgr);
@@ -557,7 +662,7 @@ static void net_update(Cpu *c) {
         return;
     }
     if (ghost.state != GHOST_ALIVE || !is_actor(ghost.actor, link)) return;
-    animate(c, anim);
+    animate(c, anim, &clip);
     float yaw = yaw_deg(want), step = fabsf(remainderf(yaw - ghost.yaw, 360.0f));
     double ms = now_ms();
     if (ghost.wrote) {

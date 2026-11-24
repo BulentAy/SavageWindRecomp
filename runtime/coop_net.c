@@ -86,10 +86,11 @@ void coop_net_counts(unsigned *sent, unsigned *received) {
     *received = atomic_load(&net.received);
 }
 
-bool coop_net_push(const float m[12], CoopAnim anim) {
+bool coop_net_push(const float m[12], CoopAnim anim, const CoopClip *clip) {
     if (!atomic_load(&net.running) || !room(&net.tx)) return false;
     CoopNetEvent event = {.received_ms = now_ms(), .anim = anim};
     memcpy(event.m, m, sizeof event.m);
+    if (clip) event.clip = *clip;
     enqueue(&net.tx, &event);
     return true;
 }
@@ -157,7 +158,7 @@ static void auth(Session *s, const char *challenge) {
 }
 
 static bool record(Session *s, uint64_t now) {
-    char *f[15], *p = s->line;
+    char *f[17], *p = s->line;
     const char *ws = " \t\v\f\r";
     unsigned n = 0;
     while (*(p += strspn(p, ws))) {
@@ -184,12 +185,12 @@ static bool record(Session *s, uint64_t now) {
         leave(s, now);
         s->peer = 0;
     }
-    if ((n != 14 && n != 15) || strcmp(f[0], "MTX")) return true;
+    if ((n != 14 && n != 15 && n != 17) || strcmp(f[0], "MTX")) return true;
     uint32_t id = id_of(f[1]);
     // shortcut: one remote at a time, replace with a peer table for multiple actors.
     if (!id || id == s->self || (s->peer && s->peer != id)) return true;
     CoopNetEvent event = {.type = COOP_NET_POSE, .id = id, .received_ms = now};
-    if (n == 15) {
+    if (n >= 15) {
         const char *a = f[14];
         if (!digits(a + (*a == '+' || *a == '-'))) return true;
         long long v = strtoll(a, NULL, 10);
@@ -207,6 +208,20 @@ static bool record(Session *s, uint64_t now) {
 #endif
         if (*end || end == num || !(fabs(v) <= (i % 4 == 3 ? 100000.0 : 1.1))) return true;
         event.m[i] = (float)v;
+    }
+    if (n == 17) {
+        const char *name = f[15], *frame = f[16];
+        size_t len = strspn(name, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_");
+        if (!len || name[len] || len >= sizeof event.clip.name || frame[strspn(frame, "0123456789.eE+-")]) return true;
+        char *end;
+#ifdef _WIN32
+        double v = _strtod_l(frame, &end, s->numeric);
+#else
+        double v = strtod(frame, &end);
+#endif
+        if (*end || end == frame || !(v >= 0 && v <= 10000)) return true;
+        memcpy(event.clip.name, name, len + 1);
+        event.clip.frame = (float)v;
     }
     if (!valid_pose(event.m)) return true;
     s->last_pose = now;
@@ -281,7 +296,7 @@ static bool step(Session *s, Sock fd, uint64_t now, CoopNetEvent *local) {
     if (s->phase == ONLINE && !s->pending && now >= s->next_tx && local->received_ms &&
         now - local->received_ms <= STALE_MS && valid_pose(local->m)) {
         const float *m = local->m;
-        const char *fmt = "MTX %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %d\n";
+        const char *fmt = "MTX %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %d";
 #define POSE_ARGS m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], (int)local->anim
 #ifdef _WIN32
         int len = _snprintf_l(s->out, sizeof s->out, fmt, s->numeric, POSE_ARGS);
@@ -289,10 +304,21 @@ static bool step(Session *s, Sock fd, uint64_t now, CoopNetEvent *local) {
         int len = snprintf(s->out, sizeof s->out, fmt, POSE_ARGS);
 #endif
 #undef POSE_ARGS
-        if (len <= 0 || len > LINE_MAX_BYTES + 1) return false;
+        if (len <= 0 || len >= LINE_MAX_BYTES) return false;
+        if (local->clip.name[0]) {
+#ifdef _WIN32
+            int n = _snprintf_l(s->out + len, sizeof s->out - len, " %s %.9g", s->numeric,
+                                local->clip.name, local->clip.frame);
+#else
+            int n = snprintf(s->out + len, sizeof s->out - len, " %s %.9g", local->clip.name, local->clip.frame);
+#endif
+            if (n <= 0 || n > LINE_MAX_BYTES - len) return false;
+            len += n;
+        }
+        s->out[len++] = '\n';
         s->sent = 0;
         s->pending = (unsigned)len;
-        s->next_tx = now + POSE_MS;
+        s->next_tx = now + (local->clip.name[0] ? POSE_MS / 2 : POSE_MS);
         atomic_fetch_add(&net.sent, 1);
         s->tx_deadline = now + TIMEOUT_MS;
         local->received_ms = 0;

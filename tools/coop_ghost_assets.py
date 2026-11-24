@@ -30,7 +30,7 @@ DONOR = 'Npc_DungeonPriest001'  # behaviour: the monk's idle AI
 LOOK = 'PauseMenuPlayer'        # model and animations: the menu's Link
 # ActorLink users taken from LOOK (the animation list is LOOK's plus IDLE), and the ones that would give the ghost
 # a body or reactions
-FROM_LOOK = ('ModelUser', 'ASUser')
+FROM_LOOK = ('ModelUser', 'ASUser', 'ActorScale')  # (the monk is drawn 1.5x bigger)
 IDLE = ('Wait', 'Player_PauseMenuWait')  # the sequence the monk's AI plays, as the menu Link's idle animation
 LOCOMOTION = {
     'CoopWalk': 'Nml_Move_Walk', 'CoopRun': 'Nml_Move_Run', 'CoopSprint': 'Nml_Move_Dash',
@@ -40,7 +40,7 @@ LOCOMOTION = {
 }
 DUMMY = ('PhysicsUser', 'AttentionUser', 'ChemicalUser', 'ElinkUser', 'SlinkUser', 'XlinkUser')
 # ActorInfo keys describing the model (the rest stays the monk's)
-MODEL_KEYS = ('bfres', 'mainModel', 'boundingForTraverse', 'aabbMin', 'aabbMax')
+MODEL_KEYS = ('bfres', 'mainModel', 'boundingForTraverse', 'aabbMin', 'aabbMax', 'actorScale')
 INST_SIZE = 700000      # actor heap; the monk's is sized for its own model, Link's needs more
 TRAVERSE_DIST = 99999   # never unloaded for distance while it stands next to the player
 
@@ -401,7 +401,7 @@ class Rstb:
 
 def link_target(link):
     """The ActorLink's user parameters: {name: param}"""
-    names = {crc(n): n for n in ('ActorNameJpn', 'Priority', 'AIProgramUser') + FROM_LOOK + DUMMY}
+    names = {crc(n): n for n in ('ActorNameJpn', 'Priority', 'AIProgramUser', 'GParamUser') + FROM_LOOK + DUMMY}
     for obj in link.objects():
         if obj[0] == crc('LinkTarget'):
             return {names.get(p[0], p[0]): p for p in obj[1]}
@@ -445,9 +445,11 @@ def build_pack(donor, look, name):
     link = Aamp(files[donor_link][1])
     users, theirs = link_target(link), link_target(Aamp(files[look_link][1]))
     for key in FROM_LOOK + DUMMY:
-        if key not in users or users[key][1] not in AAMP_STRINGS:
+        if key not in users or (users[key][1] in AAMP_STRINGS) == (key == 'ActorScale'):
             raise ValueError('ActorLink: %s missing' % key)
     for key in FROM_LOOK:
+        if key not in theirs or theirs[key][1] != users[key][1]:
+            raise ValueError('ActorLink: %s missing from %s' % (key, LOOK))
         users[key][2] = theirs[key][2]
     for key in DUMMY:
         users[key][2] = 'Dummy'

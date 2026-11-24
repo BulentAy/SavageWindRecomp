@@ -8,9 +8,12 @@ then run the game with SAVAGEWIND_ROMFS_OVERLAY=<out> SAVAGEWIND_COOP_TEST=local
 The actor is the Sheikah monk's actor pack (Npc_DungeonPriest001: an NPC that just stands and waits) whose ActorLink
 takes the pause-menu Link's model and size (PauseMenuPlayer), an animation list of its own (the menu Link's, plus the
 "Wait" sequence the monk's AI plays, as Link's own standing clip) plus locomotion clips and no physics, attention,
-chemistry or effects (users set to Dummy): a Link that is drawn and nothing touches. Three files are written:
+chemistry or effects (users set to Dummy): a Link that is drawn and nothing touches. Like the player's own hair, the
+ghost's is a separate actor built the same way from a worn piece's pack (model only, the ghost's
+sequences), which the game places and animates together with it. Files written:
 
     Actor/Pack/<name>.sbactorpack                      the new pack (the monk's and the menu Link's resources)
+    Actor/Pack/<name><piece>.sbactorpack               one per worn piece (PIECES)
     Actor/ActorInfo.product.sbyml                      the game's actor table plus an entry for <name>
     System/Resource/ResourceSizeTable.product.srsizetable  the size table plus entries for the new files
 
@@ -42,6 +45,8 @@ LOCOMOTION = {
 DUMMY = ('PhysicsUser', 'AttentionUser', 'ChemicalUser', 'ElinkUser', 'SlinkUser', 'XlinkUser')
 # ActorInfo keys describing the model (the rest stays the monk's)
 MODEL_KEYS = ('bfres', 'mainModel', 'boundingForTraverse', 'aabbMin', 'aabbMax', 'actorScale')
+# worn pieces, actor <name><key>: a bare head's hair (Link's own)
+PIECES = {'Hair': 'Armor_Default_Head'}
 INST_SIZE = 700000      # actor heap; the monk's is sized for its own model, Link's needs more
 TRAVERSE_DIST = 99999   # never unloaded for distance while it stands next to the player
 
@@ -433,14 +438,15 @@ def single_clip(aslist, clip):
     return anim.write()
 
 
-def build_pack(donor, look, name):
+def build_pack(donor, look, name, look_name=LOOK, anim=None):
     """The new pack's files and, for each file new to the game, (path, the game file whose size entry it starts
-    from, that file's length, the new length)."""
+    from, that file's length, the new length). With anim = (ASList name, its files) the actor plays those
+    sequences instead of a list derived from look's (a worn piece)."""
     files = {n: (n, d, a) for n, d, a in sarc_read(look)}
     files.update({n: (n, d, a) for n, d, a in sarc_read(donor)})  # the monk's resources win on a shared path
     links = [n for n in files if n.startswith('Actor/ActorLink/')]
     donor_link = 'Actor/ActorLink/%s.bxml' % DONOR
-    look_link = 'Actor/ActorLink/%s.bxml' % LOOK
+    look_link = 'Actor/ActorLink/%s.bxml' % look_name
     if donor_link not in links or look_link not in links:
         raise ValueError('expected %s and %s in the packs' % (donor_link, look_link))
     link = Aamp(files[donor_link][1])
@@ -450,10 +456,15 @@ def build_pack(donor, look, name):
             raise ValueError('ActorLink: %s missing' % key)
     for key in FROM_LOOK:
         if key not in theirs or theirs[key][1] != users[key][1]:
-            raise ValueError('ActorLink: %s missing from %s' % (key, LOOK))
+            raise ValueError('ActorLink: %s missing from %s' % (key, look_name))
         users[key][2] = theirs[key][2]
     for key in DUMMY:
         users[key][2] = 'Dummy'
+    if anim:
+        users['ASUser'][2] = anim[0]
+        new = ('Actor/ActorLink/%s.bxml' % name, link.write(), files[donor_link][2])
+        return [f for n, f in files.items() if n not in links] + anim[1] + [new], \
+            [(new[0], donor_link, len(files[donor_link][1]), len(new[1]))]
     # the menu Link has no sequence the monk's AI asks for: its own list under the ghost's name gets one
     look_as = 'Actor/ASList/%s.baslist' % theirs['ASUser'][2]
     idle_as = 'Actor/AS/%s.bas' % IDLE_AS
@@ -475,13 +486,13 @@ def build_pack(donor, look, name):
     return out + clips, derived
 
 
-def build_actor_info(info, name):
+def build_actor_info(info, name, look_name=LOOK):
     actors, hashes = info['Actors'], info['Hashes']
     by_name = {a['name']: a for a in actors}
     if name in by_name:
         raise ValueError('ActorInfo already has %s' % name)
     entry = dict(by_name[DONOR])
-    look = by_name[LOOK]
+    look = by_name[look_name]
     for k in MODEL_KEYS:
         entry.pop(k, None)
         if k in look:
@@ -513,19 +524,26 @@ def build(romfs, out_dir, name):
     donor_z = read(pack_rel % DONOR)
     donor, look = yaz0_decompress(donor_z), yaz0_decompress(read(pack_rel % LOOK))
     files, derived = build_pack(donor, look, name)
-    pack = sarc_write(files)
+    packs = {name: sarc_write(files)}
+    anim = (name, [f for f in files if f[0].startswith(('Actor/ASList/%s.' % name, 'Actor/AS/%s_' % name))])
+    for key, piece in PIECES.items():
+        piece_files, piece_derived = build_pack(donor, yaz0_decompress(read(pack_rel % piece)), name + key, piece, anim)
+        packs[name + key] = sarc_write(piece_files)
+        derived += piece_derived
 
     info_z = read(info_rel)
     info_raw = yaz0_decompress(info_z)
     info_doc = TypedByml(info_raw)
     version = info_doc._u(2, 2)
     info = build_actor_info(info_doc.parse(), name)
+    for key, piece in PIECES.items():
+        build_actor_info(info, name + key, piece)
     info_new = byml_write(info, version)
 
     table = Rstb(yaz0_decompress(read(rstb_rel)))
     sizes = {}
     pack_size = 'Actor/Pack/%s.bactorpack'  # (the table names a Yaz0 file without the 's')
-    for rel, src, was, now in derived + [(pack_size % name, pack_size % DONOR, len(donor), len(pack))]:
+    for rel, src, was, now in derived + [(pack_size % n, pack_size % DONOR, len(donor), len(p)) for n, p in packs.items()]:
         base = table.get(src)
         if base is None:
             raise ValueError('RSTB: no entry for %s' % src)
@@ -545,11 +563,11 @@ def build(romfs, out_dir, name):
     if old is not None:
         table.set(info_path, old + max(0, rsize(len(info_new)) - rsize(len(info_raw))))
 
-    written = {
-        pack_rel % name: yaz0_literal(pack, yaz0_align(donor_z)),
+    written = {pack_rel % n: yaz0_literal(p, yaz0_align(donor_z)) for n, p in packs.items()}
+    written.update({
         info_rel: yaz0_literal(info_new, yaz0_align(info_z)),
         rstb_rel: yaz0_literal(table.write()),
-    }
+    })
     for rel, blob in written.items():
         path = os.path.join(out_dir, rel)
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -568,10 +586,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('--romfs', default=os.path.join(repo, 'extracted', 'romfs'), help='your game\'s RomFS (read only)')
     ap.add_argument('--out', default=os.path.join(repo, 'build', 'coop-overlay'), help='overlay folder to write')
-    ap.add_argument('--name', default='CoopPlayer', help='actor name (ASCII, up to 31 characters)')
+    longest = 31 - max(map(len, PIECES))  # (actor names have 31 characters, the pieces' included)
+    ap.add_argument('--name', default='CoopPlayer', help='actor name (ASCII, up to %d characters)' % longest)
     a = ap.parse_args(argv)
-    if not a.name.isascii() or not a.name.isidentifier() or len(a.name) > 31:
-        ap.error('--name: ASCII letters, digits and _ only, up to 31 characters')
+    if not a.name.isascii() or not a.name.isidentifier() or len(a.name) > longest:
+        ap.error('--name: ASCII letters, digits and _ only, up to %d characters' % longest)
     if not os.path.isdir(os.path.join(a.romfs, 'Actor', 'Pack')):
         ap.error('--romfs: %s has no Actor/Pack folder' % a.romfs)
     if inside(a.out, a.romfs) or inside(a.romfs, a.out):

@@ -1,7 +1,7 @@
 // Co-op ghost. SAVAGEWIND_COOP_TEST=local: local proof of the pose and actor ABI, no transport. With networking
 // (runtime/coop_net.c) the first remote peer's pose drives one ghost actor. SAVAGEWIND_COOP_ACTOR=<name> picks the
 // actor (local default: a stock NPC; network default: CoopPlayer, which tools/coop_ghost_assets.py builds into a
-// SAVAGEWIND_ROMFS_OVERLAY folder).
+// SAVAGEWIND_ROMFS_OVERLAY folder, with its hair as a separate actor CoopPlayerHair).
 #include "coop.h"
 #include "coop_net.h"
 #include "control_mem.h"
@@ -49,6 +49,9 @@ static struct {
 
 enum { SAMPLES = 8, DELAY_MS = 120, MIN_GAP_MS = 50, STALE_MS = 2000, RANGE_M = 120, MAX_SPAWNS = 8, LOG_EVERY = 6 };
 enum Ghost { GHOST_NONE, GHOST_PENDING, GHOST_ALIVE };
+// The ghost's worn pieces (tools/coop_ghost_assets.py PIECES): optional actors placed and animated with it.
+enum { PIECES = 1 };
+static const char *const piece_names[PIECES] = {"Hair"};
 static const char *const sequences[] = {
     "Wait", "CoopWalk", "CoopRun", "CoopSprint", "CoopJump", "CoopFall", "CoopClimb", "CoopClimbWait",
     "CoopSwim", "CoopSwimWait", "CoopGlide",
@@ -72,6 +75,9 @@ static struct {
     CoopAnim playing;
     bool gone, wrote;
     uint64_t link, creator, actor, deadline;
+    struct { uint64_t actor; CoopAnim playing; bool off; } piece[PIECES];
+    unsigned pending;  // 1 + the piece whose creation is pending, 0 none
+    uint64_t piece_deadline;
     float put[12], err_max, link_at_spawn[3];
     // written heading; its largest per-update change (degrees) and turn rate (degrees/s) since the last TRACK
     float yaw, yaw_step_max, yaw_rate_max;
@@ -217,13 +223,19 @@ static bool call(Cpu *c, const char *name, uint64_t fn, const uint64_t *args, si
     return true;
 }
 
-// Asks for test_actor at target. A fresh scratch per request: the game may still reference an abandoned one.
-static bool request(Cpu *c, uint64_t creator, uint64_t mgr, const float target[3]) {
+// An optional actor's failure is logged instead of ending the co-op test.
+static void fail_or_log(bool optional, const char *why) {
+    if (optional) LOG("[coop] PIECE FAIL %s\n", why);
+    else fail(why);
+}
+
+// Asks for actor name at target. A fresh scratch per request: the game may still reference an abandoned one.
+static bool request(Cpu *c, uint64_t creator, uint64_t mgr, const float target[3], const char *name, bool optional) {
     uint64_t heap, accepted;
     if (!call(c, "getHeap", g_site.coop_get_heap, &mgr, 1, &heap)) return false;
     if (!ptr(heap)) { fail("invalid creation heap"); return false; }
     scratch = hle_alloc(sizeof *scratch);
-    memcpy(scratch->name, test_actor, sizeof test_actor);
+    snprintf(scratch->name, sizeof scratch->name, "%s", name);
     memcpy(scratch->key, "@P", sizeof scratch->key);
     uint64_t key = (uintptr_t)scratch->key;
     scratch->params.count = 1;
@@ -234,22 +246,22 @@ static bool request(Cpu *c, uint64_t creator, uint64_t mgr, const float target[3
     const uint64_t args[] = {creator, (uintptr_t)scratch->name, heap, (uintptr_t)&scratch->handle,
                              (uintptr_t)&scratch->params, 0, 1};
     if (!call(c, "requestCreateActor", g_site.coop_request_actor, args, 7, &accepted)) return false;
-    if (!(uint8_t)accepted) { fail("actor request rejected"); return false; }
+    if (!(uint8_t)accepted) { fail_or_log(optional, "actor request rejected"); return false; }
     return true;
 }
 
 // The pending request: -1 failed (logged), 0 still pending, 1 woken (*actor).
-static int wake(Cpu *c, uint64_t frame, uint64_t *actor) {
+static int wake(Cpu *c, uint64_t frame, uint64_t *actor, bool optional) {
     uint64_t unit = read_ptr((uintptr_t)&scratch->handle.unit);
     uint32_t state = 0;
     if (scratch->handle.failed || (unit && control_mem_peek(unit, &state, sizeof state) && (state == 3 || state == 5))) {
-        fail("asynchronous actor creation failed");
+        fail_or_log(optional, "asynchronous actor creation failed");
         return -1;
     }
     if (state != 2) return 0;
     uint64_t ready = read_ptr(unit + 0x10), handle = (uintptr_t)&scratch->handle;
     LOG("[coop] HANDLE ready update=%llu\n", (unsigned long long)frame);
-    if (!ready) { fail("ready handle has no actor"); return -1; }
+    if (!ready) { fail_or_log(optional, "ready handle has no actor"); return -1; }
     if (!call(c, "releaseAndWakeProc", g_site.coop_release_wake, &handle, 1, actor)) return -1;
     if (*actor != ready || scratch->handle.unit) { fail("wake did not release the expected actor"); return -1; }
     return 1;
@@ -259,7 +271,7 @@ static void spawn_local(Cpu *c, uint64_t creator, uint64_t mgr, const float xyz[
     memcpy(local.origin, xyz, sizeof local.origin);
     memcpy(local.target, xyz, sizeof local.target);
     local.target[0] += 3.0f;
-    if (!request(c, creator, mgr, local.target)) return;
+    if (!request(c, creator, mgr, local.target, test_actor, false)) return;
     local.creator = creator;
     local.phase = PENDING;
     local.deadline = frame + 600;
@@ -267,10 +279,19 @@ static void spawn_local(Cpu *c, uint64_t creator, uint64_t mgr, const float xyz[
         (unsigned long long)frame, test_actor, xyz[0], xyz[1], xyz[2], local.target[0], local.target[1], local.target[2]);
 }
 
-static bool is_actor(uint64_t a, uint64_t link) {
+static bool is_named(uint64_t a, uint64_t link, const char *want) {
     char name[sizeof test_actor];
-    size_t name_n = strlen(test_actor) + 1;
-    return a != link && actor_calc(a) && control_mem_peek(a + 0x1c, name, name_n) && !memcmp(name, test_actor, name_n);
+    size_t name_n = strlen(want) + 1;
+    return name_n <= sizeof name && a != link && actor_calc(a) && control_mem_peek(a + 0x1c, name, name_n) &&
+           !memcmp(name, want, name_n);
+}
+
+static bool is_actor(uint64_t a, uint64_t link) { return is_named(a, link, test_actor); }
+
+static const char *piece_name(int i) {
+    static char names[PIECES][sizeof test_actor];
+    snprintf(names[i], sizeof names[i], "%s%s", test_actor, piece_names[i]);
+    return names[i];
 }
 
 static double now_ms(void) { return plat_now_ns() / 1.0e6; }
@@ -300,12 +321,10 @@ static CoopAnim local_anim(uint64_t link, const float m[12]) {
     return anim;
 }
 
+// The ghost and its pieces play the same sequence, started in the same update so their clips stay in step.
 static void animate(Cpu *c, CoopAnim anim) {
     if (!anim_bridge || strcmp(test_actor, "CoopPlayer")) return;
     if (!anim) anim = COOP_ANIM_IDLE;
-    if (ghost.playing == anim) return;
-    uint64_t as = read_ptr(ghost.actor + 0x560);
-    if (!as) return;
     int i = anim - COOP_ANIM_IDLE;
     if (!as_names) {
         uint64_t vt = read_ptr(g_site.coop_string_vtable_slot);
@@ -317,10 +336,16 @@ static void animate(Cpu *c, CoopAnim anim) {
             snprintf(as_names[j].name, sizeof as_names[j].name, "%s", sequences[j]);
         }
     }
-    uint64_t result, args[] = {as, (uintptr_t)&as_names[i], UINT32_MAX, UINT32_MAX, 1};
-    if (!call(c, "playAS", g_site.coop_play_as, args, 5, &result)) return;
-    ghost.playing = anim;
-    LOG("[coop] ANIM RX peer=%u state=%d %s\n", ghost.peer, anim, sequences[i]);
+    for (int p = -1; p < PIECES; p++) {
+        uint64_t actor = p < 0 ? ghost.actor : ghost.piece[p].actor;
+        CoopAnim *playing = p < 0 ? &ghost.playing : &ghost.piece[p].playing;
+        uint64_t as = actor ? read_ptr(actor + 0x560) : 0;
+        if (!as || *playing == anim) continue;
+        uint64_t result, args[] = {as, (uintptr_t)&as_names[i], UINT32_MAX, UINT32_MAX, 1};
+        if (!call(c, "playAS", g_site.coop_play_as, args, 5, &result)) return;
+        *playing = anim;
+        if (p < 0) LOG("[coop] ANIM RX peer=%u state=%d %s\n", ghost.peer, anim, sequences[i]);
+    }
 }
 
 static float yaw_deg(const float m[12]) { return atan2f(m[2], m[10]) * 57.2957795f; }  // heading of local +Z
@@ -331,6 +356,51 @@ static void forget_ghost(const char *why) {
     ghost.actor = ghost.creator = 0;
     ghost.wrote = false;
     ghost.playing = COOP_ANIM_NONE;
+    memset(ghost.piece, 0, sizeof ghost.piece);
+    ghost.pending = 0;
+}
+
+static bool delete_actor(Cpu *c, uint64_t actor) {
+    uint64_t args[] = {actor, 0}, ignored;
+    return call(c, "deleteLater", g_site.coop_delete_actor, args, 2, &ignored);
+}
+
+static bool delete_pieces(Cpu *c) {
+    for (int p = 0; p < PIECES; p++) {
+        if (ghost.piece[p].actor && !delete_actor(c, ghost.piece[p].actor)) return false;
+        ghost.piece[p].actor = 0;
+    }
+    return true;
+}
+
+// One piece at a time once the ghost is alive (the creation scratch is shared). A piece the overlay lacks, or that
+// fails, stays off until the ghost is spawned again. With one pending, only finishes it (at unused).
+static void spawn_pieces(Cpu *c, uint64_t creator, uint64_t frame, const float at[3]) {
+    if (ghost.pending) {
+        int p = ghost.pending - 1;
+        uint64_t actor;
+        int r = wake(c, frame, &actor, true);
+        if (!r && frame <= ghost.piece_deadline) return;
+        ghost.pending = 0;
+        if (r <= 0) {
+            ghost.piece[p].off = true;
+            if (!r) LOG("[coop] PIECE FAIL %s confirmation timed out\n", piece_name(p));
+            return;
+        }
+        ghost.piece[p].actor = actor;
+        ghost.playing = COOP_ANIM_NONE;  // restart every clip together with the new piece's
+        for (int q = 0; q < PIECES; q++) ghost.piece[q].playing = COOP_ANIM_NONE;
+        LOG("[coop] PIECE ALIVE update=%llu %s\n", (unsigned long long)frame, piece_name(p));
+        return;
+    }
+    uint64_t mgr = read_ptr(g_site.coop_heap_mgr);
+    for (int p = 0; p < PIECES && mgr; p++) {
+        if (ghost.piece[p].actor || ghost.piece[p].off) continue;
+        if (!request(c, creator, mgr, at, piece_name(p), true)) { ghost.piece[p].off = true; return; }
+        ghost.pending = p + 1;
+        ghost.piece_deadline = frame + 600;
+        return;
+    }
 }
 
 static void drain(void) {
@@ -424,8 +494,17 @@ static void net_update(Cpu *c) {
 
     if (ghost.state == GHOST_ALIVE) {
         if (!is_actor(ghost.actor, link) || (ghost.updates % 30 == 0 && !listed(creator, ghost.actor))) {
+            if (ghost.pending) { spawn_pieces(c, creator, frame, NULL); return; }  // (no piece left behind)
+            if (!delete_pieces(c)) return;
             forget_ghost("ghost no longer listed/Calc");
             return;
+        }
+        for (int p = 0; p < PIECES; p++) {
+            if (ghost.piece[p].actor && !is_named(ghost.piece[p].actor, link, piece_name(p))) {
+                LOG("[coop] PIECE LOST %s\n", piece_name(p));
+                ghost.piece[p].actor = 0;
+                ghost.piece[p].off = true;
+            }
         }
         float back[12];
         if (ghost.wrote && pose(ghost.actor, back)) {  // what the game made of last update's write
@@ -434,8 +513,8 @@ static void net_update(Cpu *c) {
             if (e > ghost.err_max) ghost.err_max = e;
         }
         if (ghost.gone) {
-            uint64_t args[] = {ghost.actor, 0}, ignored;
-            if (!call(c, "deleteLater", g_site.coop_delete_actor, args, 2, &ignored)) return;
+            if (ghost.pending) { spawn_pieces(c, creator, frame, NULL); return; }
+            if (!delete_pieces(c) || !delete_actor(c, ghost.actor)) return;
             LOG("[coop] REMOVE update=%llu peer=%u silent_ms=%.0f\n", (unsigned long long)frame, ghost.peer,
                 now_ms() - ghost.last_ms);
             forget_ghost("removed");
@@ -444,7 +523,7 @@ static void net_update(Cpu *c) {
         }
     }
     if (ghost.state == GHOST_PENDING) {
-        int r = wake(c, frame, &ghost.actor);
+        int r = wake(c, frame, &ghost.actor, false);
         if (r < 0) return;
         if (!r) { if (frame > ghost.deadline) fail("ghost confirmation timed out"); return; }
         ghost.state = GHOST_ALIVE;
@@ -467,7 +546,7 @@ static void net_update(Cpu *c) {
         uint64_t mgr = read_ptr(g_site.coop_heap_mgr);
         if (distance(at, xyz) >= RANGE_M || framepace_in_event() || !mgr || !listed(creator, link)) return;
         if (ghost.spawns == MAX_SPAWNS) { fail("ghost spawn limit reached"); return; }
-        if (!request(c, creator, mgr, at)) return;
+        if (!request(c, creator, mgr, at, test_actor, false)) return;
         ghost.spawns++;
         ghost.state = GHOST_PENDING;
         ghost.creator = creator;
@@ -491,7 +570,10 @@ static void net_update(Cpu *c) {
     ghost.yaw = yaw;
     ghost.yaw_ms = ms;
     ghost.wrote = control_mem_poke(ghost.actor + 0x398, want, sizeof want);
+    for (int p = 0; p < PIECES; p++)
+        if (ghost.piece[p].actor) control_mem_poke(ghost.piece[p].actor + 0x398, want, sizeof want);
     memcpy(ghost.put, want, sizeof want);
+    if (anim_bridge && !strcmp(test_actor, "CoopPlayer")) spawn_pieces(c, creator, frame, at);
     if (log) {
         unsigned tx, rx;
         coop_net_counts(&tx, &rx);
@@ -570,7 +652,7 @@ void rt_coop_update(Cpu *c) {
     }
     if (creator != local.creator) { fail("ActorCreator changed before actor confirmation"); return; }
     if (local.phase == PENDING) {
-        if (wake(c, frame, &local.actor) == 1) local.phase = WOKEN;
+        if (wake(c, frame, &local.actor, false) == 1) local.phase = WOKEN;
         return;
     }
     if (!is_actor(local.actor, link) || !listed(creator, local.actor) || !pose(local.actor, m)) return;

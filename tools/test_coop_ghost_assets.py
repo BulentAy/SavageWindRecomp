@@ -59,7 +59,11 @@ def make_romfs(root):
         ('Actor/Shared.bin', b'menu', 4)])
     put('Actor/Pack/%s.sbactorpack' % g.DONOR, g.yaz0_literal(donor))
     put('Actor/Pack/%s.sbactorpack' % g.LOOK, g.yaz0_literal(look))
-    names = sorted([g.DONOR, g.LOOK, 'Zz'], key=g.crc)
+    for piece in g.PIECES.values():
+        put('Actor/Pack/%s.sbactorpack' % piece, g.yaz0_literal(g.sarc_write([
+            ('Actor/ActorLink/%s.bxml' % piece, actor_link(**{u: piece + u for u in USERS}), 4),
+            ('Actor/ModelList/%s.bmodellist' % piece, b'ML', 4)])))
+    names = sorted([g.DONOR, g.LOOK, 'Zz', *g.PIECES.values()], key=g.crc)
     actors = [{'name': n, 'bfres': n, 'instSize': 10, 'profile': 'NPC', 'aabbMin': {'X': -1.0}} for n in names]
     actors[names.index(g.LOOK)].update(mainModel='Link', bfres='Link', aabbMin={'X': -2.5})
     actors[names.index(g.DONOR)]['actorScale'] = 1.5  # (the monk is drawn bigger than Link)
@@ -182,6 +186,19 @@ class Build(unittest.TestCase):
         self.assertGreater(t.get('Actor/ASList/Ghost.baslist'), 2000)
         self.assertGreaterEqual(t.get('Actor/Pack/Ghost.bactorpack'), 64 << 10)
         self.assertEqual(t.get('Actor/Pack/%s.bactorpack' % g.DONOR), 5000)
+
+        for key, piece in g.PIECES.items():  # worn pieces: their model, the ghost's sequences
+            files = {n: b for n, b, _ in g.sarc_read(self.read('Actor/Pack/Ghost%s.sbactorpack' % key))}
+            users = {k: v[2] for k, v in g.link_target(g.Aamp(files['Actor/ActorLink/Ghost%s.bxml' % key])).items()}
+            self.assertEqual((users['ModelUser'], users['ASUser'], users['AIProgramUser']),
+                             (piece + 'ModelUser', 'Ghost', 'MonkAIProgramUser'))
+            self.assertIn('Actor/ModelList/%s.bmodellist' % piece, files)
+            self.assertEqual(files['Actor/ASList/Ghost.baslist'], pack['Actor/ASList/Ghost.baslist'])
+            self.assertIn('Actor/AS/Ghost_Wait.bas', files)
+            entry = info['Actors'][names.index('Ghost' + key)]
+            self.assertEqual((entry['bfres'], entry['instSize']), (piece, g.INST_SIZE))
+            self.assertGreaterEqual(t.get('Actor/Pack/Ghost%s.bactorpack' % key), 64 << 10)
+            self.assertGreaterEqual(t.get('Actor/ActorLink/Ghost%s.bxml' % key), 1000)
 
     def test_ghost_aslist_contains_playable_locomotion(self):
         self.assertEqual(g.main(['--romfs', self.romfs, '--out', self.out]), 0)

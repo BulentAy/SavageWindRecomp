@@ -6,9 +6,9 @@
 then run the game with SAVAGEWIND_ROMFS_OVERLAY=<out> SAVAGEWIND_COOP_TEST=local SAVAGEWIND_COOP_ACTOR=<name>.
 
 The actor is the Sheikah monk's actor pack (Npc_DungeonPriest001: an NPC that just stands and waits) whose ActorLink
-takes the pause-menu Link's model (PauseMenuPlayer), an animation list of its own (the menu Link's, plus the "Wait"
-sequence the monk's AI plays, as the menu's idle animation) plus locomotion clips and no physics, attention, chemistry or effects (users set
-to Dummy): a Link that is drawn and nothing touches. Three files are written:
+takes the pause-menu Link's model and size (PauseMenuPlayer), an animation list of its own (the menu Link's, plus the
+"Wait" sequence the monk's AI plays, as Link's own standing clip) plus locomotion clips and no physics, attention,
+chemistry or effects (users set to Dummy): a Link that is drawn and nothing touches. Three files are written:
 
     Actor/Pack/<name>.sbactorpack                      the new pack (the monk's and the menu Link's resources)
     Actor/ActorInfo.product.sbyml                      the game's actor table plus an entry for <name>
@@ -31,9 +31,10 @@ LOOK = 'PauseMenuPlayer'        # model and animations: the menu's Link
 # ActorLink users taken from LOOK (the animation list is LOOK's plus IDLE), and the ones that would give the ghost
 # a body or reactions
 FROM_LOOK = ('ModelUser', 'ASUser', 'ActorScale')  # (the monk is drawn 1.5x bigger)
-IDLE = ('Wait', 'Player_PauseMenuWait')  # the sequence the monk's AI plays, as the menu Link's idle animation
+IDLE_AS = 'Player_PauseMenuWait'  # the menu Link's idle: its size entry sizes the generated clips
+# sequence: Link's clip. 'Wait' is what the monk's AI plays (the menu's idle stoops: Link's standing clip instead).
 LOCOMOTION = {
-    'CoopWalk': 'Nml_Move_Walk', 'CoopRun': 'Nml_Move_Run', 'CoopSprint': 'Nml_Move_Dash',
+    'Wait': 'Nml_Wait', 'CoopWalk': 'Nml_Move_Walk', 'CoopRun': 'Nml_Move_Run', 'CoopSprint': 'Nml_Move_Dash',
     'CoopJump': 'Nml_Move_Run_Jump_FootL', 'CoopFall': 'Fall', 'CoopClimb': 'Climb_Wall_Move_U',
     'CoopClimbWait': 'Climb_Wall_Wait_FootL', 'CoopSwim': 'Swim_Move_Slow_F',
     'CoopSwimWait': 'Swim_Wait', 'CoopGlide': 'Float_Float_F',
@@ -455,11 +456,10 @@ def build_pack(donor, look, name):
         users[key][2] = 'Dummy'
     # the menu Link has no sequence the monk's AI asks for: its own list under the ghost's name gets one
     look_as = 'Actor/ASList/%s.baslist' % theirs['ASUser'][2]
-    idle_as = 'Actor/AS/%s.bas' % IDLE[1]
+    idle_as = 'Actor/AS/%s.bas' % IDLE_AS
     if look_as not in files or idle_as not in files:
         raise ValueError('expected %s and %s in the %s pack' % (look_as, idle_as, LOOK))
     aslist = Aamp(files[look_as][1])
-    add_sequence(aslist, *IDLE)
     users['ASUser'][2] = name
     out = [f for n, f in files.items() if n not in links]
     out.append(('Actor/ActorLink/%s.bxml' % name, link.write(), files[donor_link][2]))

@@ -55,7 +55,7 @@ def make_romfs(root):
         ('Actor/ActorLink/%s.bxml' % g.LOOK, actor_link(**{u: 'Menu' + u for u in USERS}), 8),
         ('Actor/ModelList/Menu.bmodellist', b'ML' * 7, 0x80),
         ('Actor/ASList/MenuASUser.baslist', as_list('Alpha', 'Zulu'), 4),
-        ('Actor/AS/%s.bas' % g.IDLE[1], b'AS', 4),
+        ('Actor/AS/%s.bas' % g.IDLE_AS, b'AS', 4),
         ('Actor/Shared.bin', b'menu', 4)])
     put('Actor/Pack/%s.sbactorpack' % g.DONOR, g.yaz0_literal(donor))
     put('Actor/Pack/%s.sbactorpack' % g.LOOK, g.yaz0_literal(look))
@@ -69,7 +69,7 @@ def make_romfs(root):
     t.set('Actor/Pack/%s.bactorpack' % g.DONOR, 5000)
     t.set('Actor/ActorLink/%s.bxml' % g.DONOR, 1000)
     t.set('Actor/ASList/MenuASUser.baslist', 2000)
-    t.set('Actor/AS/%s.bas' % g.IDLE[1], 256)
+    t.set('Actor/AS/%s.bas' % g.IDLE_AS, 256)
     t.names['Some/Collided.name'] = 7
     put('System/Resource/ResourceSizeTable.product.srsizetable', g.yaz0_literal(t.write()))
 
@@ -159,7 +159,7 @@ class Build(unittest.TestCase):
         self.assertEqual(users['ASUser'], 'Ghost')
         seqs = [[p[2] for p in o[1]] for o in g.Aamp(pack['Actor/ASList/Ghost.baslist']).objects()]
         self.assertEqual([s for s in seqs if not s[0].startswith('Coop')],
-                         [['Alpha', 'FileAlpha'], [g.IDLE[0], g.IDLE[1]], ['Zulu', 'FileZulu']])
+                         [['Alpha', 'FileAlpha'], ['Wait', 'Ghost_Wait'], ['Zulu', 'FileZulu']])
         self.assertIn('Actor/ASList/MenuASUser.baslist', pack)
         self.assertEqual(users['AIProgramUser'], 'MonkAIProgramUser')
         self.assertEqual(users['ActorScale'], struct.pack('<f', 1.0))  # Link's size, not the monk's
@@ -188,7 +188,7 @@ class Build(unittest.TestCase):
         pack = {n: b for n, b, _ in g.sarc_read(self.read('Actor/Pack/CoopPlayer.sbactorpack'))}
         seq = {p[0][2]: p[1][2] for _, p in g.Aamp(pack['Actor/ASList/CoopPlayer.baslist']).objects()}
         rstb = g.Rstb(self.read('System/Resource/ResourceSizeTable.product.srsizetable'))
-        for name, clip in {'CoopWalk': 'Nml_Move_Walk', 'CoopRun': 'Nml_Move_Run',
+        for name, clip in {'Wait': 'Nml_Wait', 'CoopWalk': 'Nml_Move_Walk', 'CoopRun': 'Nml_Move_Run',
                            'CoopSprint': 'Nml_Move_Dash', 'CoopJump': 'Nml_Move_Run_Jump_FootL',
                            'CoopFall': 'Fall', 'CoopClimb': 'Climb_Wall_Move_U',
                            'CoopClimbWait': 'Climb_Wall_Wait_FootL', 'CoopSwim': 'Swim_Move_Slow_F',

@@ -362,20 +362,25 @@ static void drain(void) {
 }
 
 // Rendered DELAY_MS behind the newest pose: translation and rotation interpolated, no extrapolation.
-// Rotation: rows lerped, then re-orthonormalized; a near-degenerate blend (a ~180° turn between samples) keeps the newer.
+// Rotation: the turn from p to q (q = R p) taken at constant speed, f of its angle about its axis; a ~180° turn
+// between samples has no defined axis and keeps the newer.
 static bool blend_rotation(float out[12], const float *p, const float *q, double f) {
-    float r[3][3];
+    double r[3][3];
     for (int i = 0; i < 3; i++)
-        for (int j = 0; j < 3; j++) r[i][j] = (float)(p[i * 4 + j] + f * (q[i * 4 + j] - p[i * 4 + j]));
-    for (int i = 0; i < 3; i++) {  // Gram-Schmidt on the rows
-        for (int k = 0; k < i; k++) {
-            float d = r[i][0] * r[k][0] + r[i][1] * r[k][1] + r[i][2] * r[k][2];
-            for (int j = 0; j < 3; j++) r[i][j] -= d * r[k][j];
+        for (int j = 0; j < 3; j++)
+            r[i][j] = q[i * 4] * p[j * 4] + q[i * 4 + 1] * p[j * 4 + 1] + q[i * 4 + 2] * p[j * 4 + 2];
+    double u[3] = {r[2][1] - r[1][2], r[0][2] - r[2][0], r[1][0] - r[0][1]};
+    double s = sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]) / 2, c = (r[0][0] + r[1][1] + r[2][2] - 1) / 2;
+    if (s < 1e-4 && c < 0) return false;
+    double a = f * atan2(s, c), sa = sin(a), ca = cos(a);
+    for (int k = 0; k < 3; k++) u[k] = s < 1e-4 ? 0 : u[k] / (2 * s);
+    const double x[3][3] = {{0, -u[2], u[1]}, {u[2], 0, -u[0]}, {-u[1], u[0], 0}};  // [u]x
+    for (int i = 0; i < 3; i++)  // Rodrigues: (cos a I + sin a [u]x + (1 - cos a) u u^T) p
+        for (int j = 0; j < 3; j++) {
+            double v = 0;
+            for (int k = 0; k < 3; k++) v += ((i == k) * ca + sa * x[i][k] + (1 - ca) * u[i] * u[k]) * p[k * 4 + j];
+            out[i * 4 + j] = (float)v;
         }
-        float n = sqrtf(r[i][0] * r[i][0] + r[i][1] * r[i][1] + r[i][2] * r[i][2]);
-        if (!(n > 0.1f)) return false;
-        for (int j = 0; j < 3; j++) out[i * 4 + j] = r[i][j] / n;
-    }
     return true;
 }
 

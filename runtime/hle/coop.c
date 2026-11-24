@@ -47,7 +47,7 @@ static struct {
     float origin[3], target[3];
 } local;
 
-enum { SAMPLES = 8, DELAY_MS = 120, STALE_MS = 2000, RANGE_M = 120, MAX_SPAWNS = 8, LOG_EVERY = 6 };
+enum { SAMPLES = 8, DELAY_MS = 120, MIN_GAP_MS = 50, STALE_MS = 2000, RANGE_M = 120, MAX_SPAWNS = 8, LOG_EVERY = 6 };
 enum Ghost { GHOST_NONE, GHOST_PENDING, GHOST_ALIVE };
 static const char *const sequences[] = {
     "Wait", "CoopWalk", "CoopRun", "CoopSprint", "CoopJump", "CoopFall", "CoopClimb", "CoopClimbWait",
@@ -73,6 +73,10 @@ static struct {
     bool gone, wrote;
     uint64_t link, creator, actor, deadline;
     float put[12], err_max, link_at_spawn[3];
+    // written heading; its largest per-update change (degrees) and turn rate (degrees/s) since the last TRACK
+    float yaw, yaw_step_max, yaw_rate_max;
+    double yaw_ms;
+    unsigned yaw_steps, yaw_still;  // per-update changes counted / below 0.01 degree, since the last TRACK
 } ghost;
 
 int g_coop_local;  // 1: local test, 2: network ghost (patches.py _vfr_ratio calls rt_coop_update while set)
@@ -319,6 +323,8 @@ static void animate(Cpu *c, CoopAnim anim) {
     LOG("[coop] ANIM RX peer=%u state=%d %s\n", ghost.peer, anim, sequences[i]);
 }
 
+static float yaw_deg(const float m[12]) { return atan2f(m[2], m[10]) * 57.2957795f; }  // heading of local +Z
+
 static void forget_ghost(const char *why) {
     if (ghost.state != GHOST_NONE) LOG("[coop] LOST %s state=%d\n", why, ghost.state);
     ghost.state = GHOST_NONE;  // (a pending handle's scratch is abandoned, never reused)
@@ -344,7 +350,9 @@ static void drain(void) {
         }
         if (ghost.gone) ghost.n = 0;  // (a returning peer starts a fresh history)
         if (ghost.n == SAMPLES) memmove(ghost.ring, ghost.ring + 1, --ghost.n * sizeof *ghost.ring);
-        ghost.ring[ghost.n].ms = now;
+        // Poses sent 100 ms apart can arrive in one batch: space their stamps so the blend never jumps a whole sample.
+        double ms = ghost.n ? fmax(now, ghost.ring[ghost.n - 1].ms + MIN_GAP_MS) : now;
+        ghost.ring[ghost.n].ms = fmin(ms, now + DELAY_MS / 2);
         ghost.ring[ghost.n].anim = e.anim;
         memcpy(ghost.ring[ghost.n++].m, e.m, sizeof e.m);
         ghost.last_ms = now;
@@ -442,8 +450,8 @@ static void net_update(Cpu *c) {
         if (log) {
             unsigned tx, rx;
             coop_net_counts(&tx, &rx);
-            LOG("[coop] TRACK t=%.1f update=%llu link=(%.3f,%.3f,%.3f) tx=%u rx=%u ghost=none\n", now_ms(),
-                (unsigned long long)frame, xyz[0], xyz[1], xyz[2], tx, rx);
+            LOG("[coop] TRACK t=%.1f update=%llu link=(%.3f,%.3f,%.3f) link_yaw=%.2f tx=%u rx=%u ghost=none\n", now_ms(),
+                (unsigned long long)frame, xyz[0], xyz[1], xyz[2], yaw_deg(m), tx, rx);
         }
         return;
     }
@@ -466,16 +474,30 @@ static void net_update(Cpu *c) {
     }
     if (ghost.state != GHOST_ALIVE || !is_actor(ghost.actor, link)) return;
     animate(c, anim);
+    float yaw = yaw_deg(want), step = fabsf(remainderf(yaw - ghost.yaw, 360.0f));
+    double ms = now_ms();
+    if (ghost.wrote) {
+        ghost.yaw_steps++;
+        ghost.yaw_still += step < 0.01f;
+        if (step > ghost.yaw_step_max) ghost.yaw_step_max = step;
+        if (ms > ghost.yaw_ms && step * 1000 / (ms - ghost.yaw_ms) > ghost.yaw_rate_max)
+            ghost.yaw_rate_max = (float)(step * 1000 / (ms - ghost.yaw_ms));
+    }
+    ghost.yaw = yaw;
+    ghost.yaw_ms = ms;
     ghost.wrote = control_mem_poke(ghost.actor + 0x398, want, sizeof want);
     memcpy(ghost.put, want, sizeof want);
     if (log) {
         unsigned tx, rx;
         coop_net_counts(&tx, &rx);
         const float *r = ghost.ring[ghost.n - 1].m;
-        LOG("[coop] TRACK t=%.1f update=%llu link=(%.3f,%.3f,%.3f) tx=%u rx=%u remote=(%.3f,%.3f,%.3f) "
-            "ghost=(%.3f,%.3f,%.3f) readback_max=%.4f written=%d\n", now_ms(), (unsigned long long)frame,
-            xyz[0], xyz[1], xyz[2], tx, rx, r[3], r[7], r[11], at[0], at[1], at[2], ghost.err_max, ghost.wrote);
-        ghost.err_max = 0;
+        LOG("[coop] TRACK t=%.1f update=%llu link=(%.3f,%.3f,%.3f) link_yaw=%.2f tx=%u rx=%u remote=(%.3f,%.3f,%.3f) "
+            "ghost=(%.3f,%.3f,%.3f) readback_max=%.4f written=%d remote_yaw=%.2f ghost_yaw=%.2f yaw_step_max=%.3f "
+            "yaw_rate_max=%.0f yaw_still=%u/%u\n", now_ms(), (unsigned long long)frame, xyz[0], xyz[1], xyz[2],
+            yaw_deg(m), tx, rx, r[3], r[7], r[11], at[0], at[1], at[2], ghost.err_max, ghost.wrote, yaw_deg(r), yaw,
+            ghost.yaw_step_max, ghost.yaw_rate_max, ghost.yaw_still, ghost.yaw_steps);
+        ghost.err_max = ghost.yaw_step_max = ghost.yaw_rate_max = 0;
+        ghost.yaw_steps = ghost.yaw_still = 0;
     }
 }
 

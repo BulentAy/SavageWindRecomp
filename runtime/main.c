@@ -29,6 +29,7 @@
 #include "kernel.h"
 #include "control.h"
 #include "coop.h"
+#include "coop_net.h"
 #include "cli.h"
 #include "launch_flags_boot.h"
 
@@ -168,6 +169,8 @@ static void teardown(void) {
     LOG("[reboot] game torn down in %llums (%d reset hooks)\n", (unsigned long long)((plat_now_ns() - t0) / 1000000), n);
 }
 
+RT_ON_RESET(coop_network_reset) { coop_net_stop(); }
+
 static void boot(const char *root) {
     char exefs[1024], romfs[1024], npdm_path[1024];
     snprintf(exefs, sizeof exefs, "%s/exefs", root);
@@ -187,6 +190,7 @@ static void boot(const char *root) {
     kernel_init();
     dispatch_init();
     coop_start();
+    coop_net_start();
     { extern void rupees_start(void); rupees_start(); }  // (Cheats > Infinite rupees, `rupees`: runtime/rupees.c)
     { extern void jpeg_debug_init(void); jpeg_debug_init(); }
 
@@ -513,6 +517,7 @@ int main(int argc, char **argv) {
         ui_window_init_hidden();
     }
 #endif
+    atexit(coop_net_stop);
     for (;;) {
         if (mode != LAUNCHER_NONE) {
             launcher_run(root, mode);

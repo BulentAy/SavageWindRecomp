@@ -759,6 +759,16 @@ test-control: $(B)/test_control
 
 .PHONY: test-control
 
+$(B)/test_coop_net: tools/test_coop_net.c runtime/coop_net.c runtime/coop_net.h runtime/update_crypto.c runtime/update_crypto.h
+	@mkdir -p $(B)
+	$(CC) -O1 -std=gnu11 -Wall -Wextra -Werror $(OSFLAGS) -Iruntime -o $@ $(filter %.c,$^) -lpthread -lm \
+	    $(if $(filter windows,$(PLATFORM)),-lws2_32)
+
+.PHONY: test-coop-net
+test-coop-net: $(B)/test_coop_net
+	$(or $(PY),python3) tools/test_coop_relay.py -v
+	$(or $(PY),python3) tools/test_coop_net.py $<
+
 # the named places behind goto (shrine 5, korok H23, stable wetland ...)
 $(B)/test_places: tools/test_places.c runtime/control_places.c runtime/control_places.h runtime/control_places_data.inc
 	@mkdir -p $(B)

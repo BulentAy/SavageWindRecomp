@@ -353,17 +353,35 @@ static void drain(void) {
     if (ghost.n && now - ghost.last_ms > STALE_MS) ghost.gone = true;
 }
 
-// Rendered DELAY_MS behind the newest pose: translation interpolated, newest rotation, no extrapolation.
+// Rendered DELAY_MS behind the newest pose: translation and rotation interpolated, no extrapolation.
+// Rotation: rows lerped, then re-orthonormalized; a near-degenerate blend (a ~180° turn between samples) keeps the newer.
+static bool blend_rotation(float out[12], const float *p, const float *q, double f) {
+    float r[3][3];
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++) r[i][j] = (float)(p[i * 4 + j] + f * (q[i * 4 + j] - p[i * 4 + j]));
+    for (int i = 0; i < 3; i++) {  // Gram-Schmidt on the rows
+        for (int k = 0; k < i; k++) {
+            float d = r[i][0] * r[k][0] + r[i][1] * r[k][1] + r[i][2] * r[k][2];
+            for (int j = 0; j < 3; j++) r[i][j] -= d * r[k][j];
+        }
+        float n = sqrtf(r[i][0] * r[i][0] + r[i][1] * r[i][1] + r[i][2] * r[i][2]);
+        if (!(n > 0.1f)) return false;
+        for (int j = 0; j < 3; j++) out[i * 4 + j] = r[i][j] / n;
+    }
+    return true;
+}
+
 static CoopAnim target_pose(float out[12]) {
     double t = now_ms() - DELAY_MS;
     memcpy(out, ghost.ring[ghost.n - 1].m, 12 * sizeof *out);
     unsigned i = ghost.n - 1;
     while (i && ghost.ring[i - 1].ms > t) i--;
     if (!i || ghost.ring[i].ms <= t) {
-        for (int k = 3; k < 12; k += 4) out[k] = ghost.ring[i].m[k];
+        memcpy(out, ghost.ring[i].m, 12 * sizeof *out);
         return ghost.ring[i].anim;
     }
     double a = ghost.ring[i - 1].ms, b = ghost.ring[i].ms, f = b > a ? (t - a) / (b - a) : 1;
+    if (!blend_rotation(out, ghost.ring[i - 1].m, ghost.ring[i].m, f)) memcpy(out, ghost.ring[i].m, 12 * sizeof *out);
     for (int k = 3; k < 12; k += 4)
         out[k] = (float)(ghost.ring[i - 1].m[k] + f * (ghost.ring[i].m[k] - ghost.ring[i - 1].m[k]));
     return ghost.ring[i - 1].anim;

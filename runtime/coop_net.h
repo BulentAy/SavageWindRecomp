@@ -19,3 +19,5 @@ typedef struct {
 // to the newest pose, applying JOIN and LEFT in order. JOIN means first valid pose.
 bool coop_net_push(const float m[12]);
 bool coop_net_pop(CoopNetEvent *event);
+// MTX records handed to the socket / valid remote poses queued, since start (diagnostics).
+void coop_net_counts(unsigned *sent, unsigned *received);

@@ -171,17 +171,21 @@ def main():
     finally:
         gs.SITES = saved
 
-    # Version-pinned bridge: one bad slot/entry or an unknown build disables all five sites.
-    coop = {'coop_actor_creator', 'coop_heap_mgr', 'coop_get_heap', 'coop_request_actor', 'coop_release_wake'}
+    # Version-pinned bridge: one bad slot/entry or an unknown build disables all six sites.
+    coop = {'coop_actor_creator', 'coop_heap_mgr', 'coop_get_heap', 'coop_request_actor', 'coop_release_wake',
+            'coop_delete_actor'}
     check(any(set(g) == coop for g in gs.OPTIONAL_GROUPS), 'co-op bridge resolves as a single group')
     try:
         gs.SITES = [s for s in saved if s.name in coop]
-        known = dict(zip(sorted(coop), (BASE + 0x3000, BASE + 0x100, BASE + 0x3008, BASE + 0x500, BASE + 0x800)))
-        b.fdes = [(BASE + a, BASE + a + 0x20) for a in (0x100, 0x500, 0x800)]
-        check(gs.resolve(b, known) == known, 'co-op: all five addresses match the structural ABI')
+        known = {'coop_actor_creator': BASE + 0x3000, 'coop_heap_mgr': BASE + 0x3008, 'coop_get_heap': BASE + 0x100,
+                 'coop_request_actor': BASE + 0x800, 'coop_release_wake': BASE + 0x500,
+                 'coop_delete_actor': BASE + 0x900}
+        b.fdes = [(BASE + a, BASE + a + 0x20) for a in (0x100, 0x500, 0x800, 0x900)]
+        check(gs.resolve(b, known) == known, 'co-op: all six addresses match the structural ABI')
         check(gs.resolve(b) == {}, 'co-op: unknown build cannot supply actor ABI sites')
         check(gs.resolve(b, dict(known, coop_actor_creator=BASE + 0x2000)) == {}, 'co-op: slot outside BSS')
         check(gs.resolve(b, dict(known, coop_get_heap=BASE + 0x104)) == {}, 'co-op: interior address is not an entry')
+        check(gs.resolve(b, dict(known, coop_delete_actor=BASE + 0x904)) == {}, 'co-op: delete must be an entry too')
     finally:
         gs.SITES = saved
 

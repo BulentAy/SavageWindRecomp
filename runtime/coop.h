@@ -1,4 +1,6 @@
-// Single-instance co-op diagnostic, off unless SAVAGEWIND_COOP_TEST=local.
+// Co-op ghost: off unless SAVAGEWIND_COOP_TEST=local (single-instance diagnostic) or networking is configured.
 #pragma once
 
-void coop_start(void);
+#include <stdbool.h>
+
+void coop_start(bool net);  // net: runtime/coop_net.c started

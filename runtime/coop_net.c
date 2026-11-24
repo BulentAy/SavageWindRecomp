@@ -44,6 +44,7 @@ static struct {
     pthread_mutex_t lifecycle;
     pthread_t thread;
     atomic_bool running, connected;
+    atomic_uint sent, received;
     struct sockaddr_in address;
     char password[1025];
     Queue tx, rx;
@@ -79,6 +80,11 @@ static uint64_t now_ms(void) {
 }
 
 bool coop_net_connected(void) { return atomic_load(&net.connected); }
+
+void coop_net_counts(unsigned *sent, unsigned *received) {
+    *sent = atomic_load(&net.sent);
+    *received = atomic_load(&net.received);
+}
 
 bool coop_net_push(const float m[12]) {
     if (!atomic_load(&net.running) || !room(&net.tx)) return false;
@@ -171,6 +177,7 @@ static bool record(Session *s, uint64_t now) {
         if (n != 1 || strcmp(f[0], "WELCOME") || s->pending) return false;
         s->phase = ONLINE;
         atomic_store(&net.connected, true);
+        fprintf(stderr, "[coop] WELCOME id=%u\n", s->self);
         return true;
     }
     if (n == 2 && !strcmp(f[0], "BYE") && s->peer && id_of(f[1]) == s->peer) {
@@ -211,6 +218,7 @@ static bool record(Session *s, uint64_t now) {
         s->present = true;
     }
     enqueue(&net.rx, &event);
+    atomic_fetch_add(&net.received, 1);
     return true;
 }
 
@@ -284,6 +292,7 @@ static bool step(Session *s, Sock fd, uint64_t now, CoopNetEvent *local) {
         s->sent = 0;
         s->pending = (unsigned)len;
         s->next_tx = now + POSE_MS;
+        atomic_fetch_add(&net.sent, 1);
         s->tx_deadline = now + TIMEOUT_MS;
         local->received_ms = 0;
     }
@@ -406,6 +415,8 @@ bool coop_net_start(void) {
     atomic_store(&net.tx.tail, 0);
     atomic_store(&net.rx.head, 0);
     atomic_store(&net.rx.tail, 0);
+    atomic_store(&net.sent, 0);
+    atomic_store(&net.received, 0);
     atomic_store(&net.running, true);
     if (!pthread_create(&net.thread, NULL, worker, NULL)) { ok = true; goto done; }
     atomic_store(&net.running, false);

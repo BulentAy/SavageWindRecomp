@@ -77,7 +77,12 @@ int main(int argc, char **argv) {
                     pose(expected, other, sample);
                     assert(sample > last && !memcmp(expected, event.m, sizeof expected));
                     last = sample;
-                    if (++received == goal) printf("round=%d exact=%d\n", round, received);
+                    if (++received == goal) {
+                        unsigned tx, rx;
+                        coop_net_counts(&tx, &rx);
+                        assert(tx > 0 && rx >= (unsigned)received);
+                        printf("round=%d exact=%d\n", round, received);
+                    }
                 }
             }
             if (tick % 12 == 0 && coop_net_connected()) {

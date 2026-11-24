@@ -61,7 +61,8 @@ PAD_QUERY = ('a9be7bfd a9014ff4 910003fd 7100a43f 90000008/9f00001f 91000108/ffc
              '7200001f 1a941114')
 OPT_TWO_SITES = ('opt_two_redraw', 'opt_two_select', 'opt_two_state', 'opt_two_decide', 'opt_two_after', 'opt_two_row_state', 'opt_two_update_control', 'opt_two_initial_control', 'opt_two_left', 'opt_two_right', 'opt_two_text', 'opt_two_help', 'opt_two_pane_calc')
 
-COOP_SITES = ('coop_actor_creator', 'coop_heap_mgr', 'coop_get_heap', 'coop_request_actor', 'coop_release_wake')
+COOP_SITES = ('coop_actor_creator', 'coop_heap_mgr', 'coop_get_heap', 'coop_request_actor', 'coop_release_wake',
+              'coop_delete_actor')
 
 SITES = [
     # Local co-op sites use version-pinned structural patterns, not copied guest opcodes.
@@ -70,6 +71,7 @@ SITES = [
     Site('coop_get_heap', 'entry', '', 0),
     Site('coop_request_actor', 'entry', '', 0),
     Site('coop_release_wake', 'entry', '', 0),
+    Site('coop_delete_actor', 'entry', '', 0),
     # Experimental dual binding cells. Every pattern must match; no KNOWN fallback.
     Site('opt_two_redraw', 'code', 'd10103ff a9017bfd a90257f6 a9034ff4 910043fd 90000009/9f00001f 91000129/ffc003ff b9405008', 0),
     Site('opt_two_select', 'code', 'b976b008 7100051f 5400000b/ff00001f a9be7bfd a9014ff4 910003fd 9000000b/9f00001f 9100016b/ffc003ff', 0),
@@ -530,6 +532,7 @@ KNOWN = {
         'coop_get_heap': 0x700151cf94,
         'coop_request_actor': 0x7001535b10,
         'coop_release_wake': 0x7001516b74,
+        'coop_delete_actor': 0x7001514bac,
         'ui_layout_draw': 0x70013ee084,
         'ui_layout_native': 0x7000f6f690,
         'ui_layout_pane': 0x7000027d30,

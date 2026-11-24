@@ -171,6 +171,20 @@ def main():
     finally:
         gs.SITES = saved
 
+    # Version-pinned bridge: one bad slot/entry or an unknown build disables all five sites.
+    coop = {'coop_actor_creator', 'coop_heap_mgr', 'coop_get_heap', 'coop_request_actor', 'coop_release_wake'}
+    check(any(set(g) == coop for g in gs.OPTIONAL_GROUPS), 'co-op bridge resolves as a single group')
+    try:
+        gs.SITES = [s for s in saved if s.name in coop]
+        known = dict(zip(sorted(coop), (BASE + 0x3000, BASE + 0x100, BASE + 0x3008, BASE + 0x500, BASE + 0x800)))
+        b.fdes = [(BASE + a, BASE + a + 0x20) for a in (0x100, 0x500, 0x800)]
+        check(gs.resolve(b, known) == known, 'co-op: all five addresses match the structural ABI')
+        check(gs.resolve(b) == {}, 'co-op: unknown build cannot supply actor ABI sites')
+        check(gs.resolve(b, dict(known, coop_actor_creator=BASE + 0x2000)) == {}, 'co-op: slot outside BSS')
+        check(gs.resolve(b, dict(known, coop_get_heap=BASE + 0x104)) == {}, 'co-op: interior address is not an entry')
+    finally:
+        gs.SITES = saved
+
     # ---- versions
     check(gs.supported_version('cd57b23fa4bbad65' + '0' * 48).name == '1.9.0', '1.9.0 by build id')
     check(gs.supported_version('de0b6ac4efc1dda7f80f6d7598ec7a7d' + '0' * 32) is None, '1.8.2 is no longer known')

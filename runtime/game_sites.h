@@ -34,6 +34,11 @@
 
 // Optional helpers are zero when their complete feature group was not found.
 #define GAME_SITES_OPTIONAL(X) \
+    X(coop_actor_creator)    /* ActorCreator singleton slot */ \
+    X(coop_heap_mgr)         /* BaseProcHeapMgr singleton slot */ \
+    X(coop_get_heap) \
+    X(coop_request_actor) \
+    X(coop_release_wake) \
     X(ui_control_layer)       /* a UI screen's input layer (runtime/menu_wrap.c) */ \
     X(pouch_lock)             /* native recursive inventory mutex */ \
     X(pouch_unlock)           \

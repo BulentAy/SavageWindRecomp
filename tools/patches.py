@@ -421,7 +421,8 @@ def _frame_wait(gen, a):
 
 def _vfr_ratio(gen, a):
     assert _word(gen, a) == 0xb9407a68, hex(_word(gen, a))  # ldr w8, [x19, #0x78]
-    return ('{ extern void rt_vfr_update(uint64_t); rt_vfr_update(c->x[19]); c->x[8] = LD32(c->x[19] + 0x78); }'
+    return ('{ extern void rt_vfr_update(uint64_t); extern void rt_coop_update(Cpu *); extern int g_coop_local; '
+            'rt_vfr_update(c->x[19]); if (g_coop_local) rt_coop_update(c); c->x[8] = LD32(c->x[19] + 0x78); }'
             f'  /* {a:#x}: ldr w8, [x19, #0x78] (VFR: interval ratio) */')
 
 

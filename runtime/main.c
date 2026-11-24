@@ -28,6 +28,7 @@
 #include "hle.h"
 #include "kernel.h"
 #include "control.h"
+#include "coop.h"
 #include "cli.h"
 #include "launch_flags_boot.h"
 
@@ -185,6 +186,7 @@ static void boot(const char *root) {
     plat_cpu_placement();
     kernel_init();
     dispatch_init();
+    coop_start();
     { extern void rupees_start(void); rupees_start(); }  // (Cheats > Infinite rupees, `rupees`: runtime/rupees.c)
     { extern void jpeg_debug_init(void); jpeg_debug_init(); }
 

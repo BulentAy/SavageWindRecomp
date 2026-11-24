@@ -61,7 +61,15 @@ PAD_QUERY = ('a9be7bfd a9014ff4 910003fd 7100a43f 90000008/9f00001f 91000108/ffc
              '7200001f 1a941114')
 OPT_TWO_SITES = ('opt_two_redraw', 'opt_two_select', 'opt_two_state', 'opt_two_decide', 'opt_two_after', 'opt_two_row_state', 'opt_two_update_control', 'opt_two_initial_control', 'opt_two_left', 'opt_two_right', 'opt_two_text', 'opt_two_help', 'opt_two_pane_calc')
 
+COOP_SITES = ('coop_actor_creator', 'coop_heap_mgr', 'coop_get_heap', 'coop_request_actor', 'coop_release_wake')
+
 SITES = [
+    # Local co-op sites use version-pinned structural patterns, not copied guest opcodes.
+    Site('coop_actor_creator', 'bss_slot', '', 0),
+    Site('coop_heap_mgr', 'bss_slot', '', 0),
+    Site('coop_get_heap', 'entry', '', 0),
+    Site('coop_request_actor', 'entry', '', 0),
+    Site('coop_release_wake', 'entry', '', 0),
     # Experimental dual binding cells. Every pattern must match; no KNOWN fallback.
     Site('opt_two_redraw', 'code', 'd10103ff a9017bfd a90257f6 a9034ff4 910043fd 90000009/9f00001f 91000129/ffc003ff b9405008', 0),
     Site('opt_two_select', 'code', 'b976b008 7100051f 5400000b/ff00001f a9be7bfd a9014ff4 910003fd 9000000b/9f00001f 9100016b/ffc003ff', 0),
@@ -475,6 +483,7 @@ OPTIONAL_GROUPS = [
      'quick_sort_modal', 'pouch_sort', 'quick_sort_refill', 'quick_sort_mapping', 'quick_sort_cursor',
      'quick_sort_labels', 'pouch_lock', 'pouch_unlock', 'quick_sort_event', 'quick_sort_player_busy'),
     OPT_TWO_SITES,
+    COOP_SITES,
     ('lookat_update',),  # (the free camera: without it Home does nothing)
     ('gyro_scene_actor',),
     ('surf_contact', 'surf_boost_remove', 'surf_jump_request'),
@@ -516,6 +525,11 @@ OPTIONAL = {n for g in OPTIONAL_GROUPS for n in g}
 
 KNOWN = {
     '1.9.0': {
+        'coop_actor_creator': 0x7001e95430,
+        'coop_heap_mgr': 0x7001e93868,
+        'coop_get_heap': 0x700151cf94,
+        'coop_request_actor': 0x7001535b10,
+        'coop_release_wake': 0x7001516b74,
         'ui_layout_draw': 0x70013ee084,
         'ui_layout_native': 0x7000f6f690,
         'ui_layout_pane': 0x7000027d30,
@@ -898,6 +912,18 @@ class Main:
             return self.base + struct.unpack_from('<Q', self.nso.image, v - self.base)[0]
         return v
 
+    def matches_abi(self, kind, address):
+        """Structural patterns for version-pinned symbols called directly by the runtime."""
+        if kind == 'bss_slot':
+            data, size = self.nso.data
+            return address % 8 == 0 and self.base + data + size <= address <= self.base + self.nso.size - 8
+        if kind == 'entry':
+            if address % 4 or not self.base + self.text_off <= address < self.base + self.text_off + self.text_size:
+                return False
+            extent = self.function_of(address)
+            return extent is not None and extent[0] == address
+        return False
+
     def locate(self, s):
         """(address, or None when the pattern doesn't find exactly one place; how many places it matches) of a site"""
         if s.kind == 'data':
@@ -972,19 +998,21 @@ def resolve(main, known=None, log=None):
     """{site name: address} for this main module. known: the addresses listed for its build (or None)."""
     out, problems = {}, []
     for s in SITES:
+        k = (known or {}).get(s.name)
+        if s.name in COOP_SITES:
+            if k is not None and main.matches_abi(s.kind, k):
+                out[s.name] = k
+            continue  # never fall back or infer the actor ABI on an unverified build
         try:
             found, hits = main.locate(s)
         except SiteError as e:
             problems.append(f'{s.name}: {e}')
             continue
-        # This experiment changes native object routing. A stale KNOWN address
-        # must never turn it on after a failed signature check.
-        if s.name in OPT_TWO_SITES and (found is None or
-                                      (known and s.name in known and found != known[s.name])):
+        # Experimental native object routing must never use an unchecked address.
+        if s.name in OPT_TWO_SITES and (found is None or (k is not None and found != k)):
             if log:
                 log(f'game_sites: {s.name}: spike signature did not match')
             continue
-        k = (known or {}).get(s.name)
         if found is not None and k is not None and found != k:
             raise SiteError(f'{s.name}: the pattern finds {found:#x}, the table says {k:#x}')
         if found is None and k is None:

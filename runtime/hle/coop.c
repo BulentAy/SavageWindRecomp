@@ -1,4 +1,5 @@
-// Local proof of the pose and actor ABI. No transport or custom assets.
+// Local proof of the pose and actor ABI. No transport. SAVAGEWIND_COOP_ACTOR=<name> spawns another actor than the
+// stock NPC, e.g. the ghost Link tools/coop_ghost_assets.py builds into a SAVAGEWIND_ROMFS_OVERLAY folder.
 #include "coop.h"
 #include "control_mem.h"
 #include "framepace.h"
@@ -8,7 +9,7 @@
 
 #include <math.h>
 
-static const char test_actor[] = "Npc_Kakariko003";
+static char test_actor[32] = "Npc_Kakariko003";  // (or SAVAGEWIND_COOP_ACTOR)
 
 typedef struct {
     uint64_t unit;
@@ -53,6 +54,15 @@ RT_ON_RESET(coop_reset) {
 void coop_start(void) {
     const char *mode = getenv("SAVAGEWIND_COOP_TEST");
     if (!mode || strcmp(mode, "local")) return;
+    const char *actor = getenv("SAVAGEWIND_COOP_ACTOR");
+    if (actor && *actor) {
+        size_t n = strspn(actor, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_");
+        if (actor[n] || n >= sizeof test_actor) {
+            LOG("[coop] FAIL SAVAGEWIND_COOP_ACTOR: up to %zu letters, digits or _\n", sizeof test_actor - 1);
+            return;
+        }
+        memcpy(test_actor, actor, n + 1);
+    }
     if (strcmp(gamelib_tables()->version, "1.9.0") || !g_site.coop_actor_creator || !g_site.coop_heap_mgr ||
         !dispatch_lookup(g_site.coop_get_heap) || !dispatch_lookup(g_site.coop_request_actor) ||
         !dispatch_lookup(g_site.coop_release_wake)) {
@@ -230,8 +240,9 @@ void rt_coop_update(Cpu *c) {
         return;
     }
     char name[sizeof test_actor];
+    size_t name_n = strlen(test_actor) + 1;
     if (local.actor == link || !actor_calc(local.actor) || !listed(creator, local.actor) ||
-        !control_mem_peek(local.actor + 0x1c, name, sizeof name) || memcmp(name, test_actor, sizeof name) ||
+        !control_mem_peek(local.actor + 0x1c, name, name_n) || memcmp(name, test_actor, name_n) ||
         !pose(local.actor, m)) return;
     float actual[] = {m[3], m[7], m[11]};
     LOG("[coop] ALIVE update=%llu %s listed=1 state=Calc actor=(%.3f,%.3f,%.3f) distance=%.3f target_error=%.3f "

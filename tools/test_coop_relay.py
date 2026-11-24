@@ -93,6 +93,21 @@ class RelayTest(unittest.TestCase):
             a.sendall(b"MTX 0 0 0 0 0 0 0 0 0 0 0 0\nMTX " + MTX + b"\n")
             self.assertEqual(rx.readline(), b"MTX " + aid + b" " + MTX + b"\n")
 
+    def test_gear_records_forwarded_only_when_valid(self):
+        with relay() as port, peer(port) as (b, rx, _, bnonce), peer(port) as (a, ack, aid, anonce):
+            b.sendall(auth(bnonce))
+            a.sendall(auth(anonce))
+            self.assertEqual(rx.readline(), b"WELCOME\n")
+            self.assertEqual(ack.readline(), b"WELCOME\n")
+            near = MTX.replace(b"123.5", b"-0.32").replace(b"-24", b"0.82").replace(b"8.25", b"0.23")
+            for bad in (b"6 -", b"1 x", b"-1 -", b"1 Weapon_Sword_001", b"1 Sword_001 " + near,
+                        b"1 Weapon_Sword-001 " + near, b"1 Weapon_" + b"A" * 17 + b" " + near,
+                        b"1 Weapon_Sword_001 " + MTX, b"1 Weapon_Sword_001 " + near.replace(b"1 0 0", b"0 0 0", 1)):
+                a.sendall(b"WPN " + bad + b"\n")
+            a.sendall(b"WPN 2 -\nWPN 5 Weapon_Shield_001 " + near + b"\n")
+            self.assertEqual(rx.readline(), b"WPN " + aid + b" 2 -\n")
+            self.assertEqual(rx.readline(), b"WPN " + aid + b" 5 Weapon_Shield_001 " + near + b"\n")
+
     def test_disconnects_on_oversize_unterminated_line(self):
         with relay() as port, peer(port) as (sock, lines, _, nonce):
             sock.sendall(auth(nonce))

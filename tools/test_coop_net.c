@@ -16,6 +16,12 @@ static void pose(float m[12], int peer, int seq) {
     memcpy(m, v, sizeof v);
 }
 
+static CoopGear sword(int peer) {
+    CoopGear g = {.m = {0, 0, 1, -0.32f, 0, 1, 0, 0.82f, -1, 0, 0, 0.25f * peer}};
+    snprintf(g.name, sizeof g.name, "Weapon_Sword_%03d", peer);
+    return g;
+}
+
 static int wire(void) {
     assert(coop_net_start());
     for (int i = 0; !coop_net_connected() && i < 700; i++) pause_ms(10);
@@ -56,6 +62,8 @@ int main(int argc, char **argv) {
     int me = atoi(argv[1]), other = 3 - me;
     assert(me == 1 || me == 2);
     assert(coop_net_start());
+    CoopGear worn[COOP_GEAR_SLOTS] = {[1] = sword(me)}, seen[COOP_GEAR_SLOTS];
+    coop_net_set_gear(worn);
     for (int round = 1; round <= 2; round++) {
         for (int i = 0; !coop_net_connected() && i < 1000; i++) pause_ms(10);
         assert(coop_net_connected());
@@ -83,6 +91,9 @@ int main(int argc, char **argv) {
                         unsigned tx, rx;
                         coop_net_counts(&tx, &rx);
                         assert(tx > 0 && rx >= (unsigned)received);
+                        CoopGear expected = sword(other);
+                        assert(coop_net_peer_gear(seen) == id && !seen[0].name[0] && !seen[2].name[0]);
+                        assert(!strcmp(seen[1].name, expected.name) && !memcmp(seen[1].m, expected.m, sizeof expected.m));
                         printf("round=%d exact=%d\n", round, received);
                     }
                 }

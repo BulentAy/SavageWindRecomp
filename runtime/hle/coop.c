@@ -11,6 +11,7 @@
 #include "hle.h"
 
 #include <math.h>
+#include <stdatomic.h>
 
 static char test_actor[32] = "Npc_Kakariko003";  // (or SAVAGEWIND_COOP_ACTOR)
 
@@ -48,12 +49,27 @@ static struct {
 
 enum { SAMPLES = 8, DELAY_MS = 120, STALE_MS = 2000, RANGE_M = 120, MAX_SPAWNS = 8, LOG_EVERY = 6 };
 enum Ghost { GHOST_NONE, GHOST_PENDING, GHOST_ALIVE };
+static const char *const sequences[] = {
+    "Wait", "CoopWalk", "CoopRun", "CoopSprint", "CoopJump", "CoopFall", "CoopClimb", "CoopClimbWait",
+    "CoopSwim", "CoopSwimWait", "CoopGlide",
+};
+_Static_assert(sizeof sequences / sizeof *sequences == COOP_ANIM_GLIDE - COOP_ANIM_IDLE + 1, "locomotion table");
+static struct { uint64_t vtable, data; char name[16]; } *as_names;
+// The AS hook can run on a different guest thread. Publish the actor and its state together.
+static _Atomic uint64_t observed_as;
+static bool anim_bridge;
+static struct {
+    float x, z, speed;
+    double ms;
+    CoopAnim last;
+} gait;
 static struct {
     uint32_t peer;
     unsigned n, spawns, updates;
     double last_ms;  // newest pose, game-thread receive time
-    struct { double ms; float m[12]; } ring[SAMPLES];  // oldest first
+    struct { double ms; CoopAnim anim; float m[12]; } ring[SAMPLES];  // oldest first
     enum Ghost state;
+    CoopAnim playing;
     bool gone, wrote;
     uint64_t link, creator, actor, deadline;
     float put[12], err_max, link_at_spawn[3];
@@ -64,6 +80,10 @@ int g_coop_local;  // 1: local test, 2: network ghost (patches.py _vfr_ratio cal
 RT_ON_RESET(coop_reset) {
     g_coop_local = 0;
     scratch = NULL;
+    as_names = NULL;
+    anim_bridge = false;
+    atomic_store(&observed_as, 0);
+    memset(&gait, 0, sizeof gait);
     memset(&local, 0, sizeof local);
     memset(&ghost, 0, sizeof ghost);
 }
@@ -88,6 +108,7 @@ void coop_start(bool net) {
         LOG("[coop] FAIL bridge sites unavailable for this game library\n");
         return;
     }
+    anim_bridge = !test && g_site.coop_string_vtable_slot && dispatch_lookup(g_site.coop_play_as);
     g_coop_local = test ? 1 : 2;
     if (!test) LOG("[coop] NET ghost actor %s\n", test_actor);
 }
@@ -97,6 +118,35 @@ static bool ptr(uint64_t a) { return a >= GUEST_LO && a < GUEST_HI && !(a & 7); 
 static uint64_t read_ptr(uint64_t addr) {
     uint64_t a;
     return control_mem_peek(addr, &a, sizeof a) && ptr(a) ? a : 0;
+}
+
+static uint64_t player(void) {
+    uint64_t info = read_ptr(g_site.player_info);
+    return info ? read_ptr(info + 0x60) : 0;
+}
+
+static CoopAnim classify_as(const char *name) {
+    if (!strcmp(name, "ParashawlGlide") || !strcmp(name, "SurfingOnPara")) return COOP_ANIM_GLIDE;
+    if (!strcmp(name, "ClimbWait") || !strcmp(name, "LadderWait")) return COOP_ANIM_CLIMB_WAIT;
+    if (!strncmp(name, "ClimbMove", 9) || !strncmp(name, "ClimbJump", 9) || !strncmp(name, "WallDash", 8) ||
+        !strcmp(name, "ClimbSlip") || !strncmp(name, "LadderMove", 10)) return COOP_ANIM_CLIMB;
+    if (!strcmp(name, "SwimWait")) return COOP_ANIM_SWIM_WAIT;
+    if (!strncmp(name, "SwimMove", 8) || !strcmp(name, "SwimAtnMove") || !strcmp(name, "SwimDash")) return COOP_ANIM_SWIM;
+    if (!strcmp(name, "Fall") || !strcmp(name, "SurfingOnFall")) return COOP_ANIM_FALL;
+    if (!strcmp(name, "Jump") || !strcmp(name, "BackJump")) return COOP_ANIM_JUMP;
+    return COOP_ANIM_NONE;  // Ground movement uses a blended sequence; derive its gait from Link's speed.
+}
+
+void rt_coop_observe_as(Cpu *c) {
+    if ((uint32_t)c->x[2] != 0 && (uint32_t)c->x[2] != UINT32_MAX) return;
+    uint64_t link = player();
+    if (!link || !c->x[0] || read_ptr(link + 0x560) != c->x[0]) return;
+    uint64_t text = 0;
+    char name[48];
+    if (!control_mem_peek(c->x[1] + 8, &text, sizeof text) || !text ||
+        !control_mem_peek(text, name, sizeof name) || !memchr(name, 0, sizeof name)) return;
+    uint64_t state = (link << 8) | (unsigned)classify_as(name);
+    atomic_store_explicit(&observed_as, state, memory_order_relaxed);
 }
 
 static bool actor_calc(uint64_t a) {
@@ -142,6 +192,7 @@ static bool call(Cpu *c, const char *name, uint64_t fn, const uint64_t *args, si
     uint64_t fpcr = rt_get_fpcr(), fpsr = rt_get_fpsr(), frame = framepace_game_frame();
     local.calling = true;
     memcpy(c->x, args, n * sizeof *args);
+    if (fn == g_site.coop_play_as) c->v[0] = c->v[1] = 0; // AS blend offsets in s0/s1
     guest_call(c, fn);
     uint64_t ret = c->x[0];
     bool stack_ok = c->sp == saved.sp;
@@ -220,11 +271,60 @@ static bool is_actor(uint64_t a, uint64_t link) {
 
 static double now_ms(void) { return plat_now_ns() / 1.0e6; }
 
+static CoopAnim local_anim(uint64_t link, const float m[12]) {
+    if (!anim_bridge) return COOP_ANIM_NONE;
+    double now = now_ms(), dt = now - gait.ms;
+    if (!gait.ms || dt >= 300) {
+        gait.x = m[3]; gait.z = m[11]; gait.ms = now; gait.speed = 0;
+    } else if (dt >= 80) {
+        gait.speed = hypotf(m[3] - gait.x, m[11] - gait.z) * (float)(1000 / dt);
+        gait.x = m[3]; gait.z = m[11]; gait.ms = now;
+    }
+    uint64_t observed = atomic_load_explicit(&observed_as, memory_order_relaxed);
+    CoopAnim anim = observed >> 8 == link ? (CoopAnim)(observed & 0xff) : COOP_ANIM_NONE;
+    if (!anim) {
+        // A discontinuity (e.g. teleport) isn't a sprint.
+        if (gait.speed < 0.30f || gait.speed > 20.0f) anim = COOP_ANIM_IDLE;
+        else if (gait.speed < 2.8f) anim = COOP_ANIM_WALK;
+        else if (gait.speed < 6.5f) anim = COOP_ANIM_RUN;
+        else anim = COOP_ANIM_SPRINT;
+    }
+    if (anim != gait.last) {
+        LOG("[coop] ANIM TX state=%d %s speed=%.2f\n", anim, sequences[anim - COOP_ANIM_IDLE], gait.speed);
+        gait.last = anim;
+    }
+    return anim;
+}
+
+static void animate(Cpu *c, CoopAnim anim) {
+    if (!anim_bridge || strcmp(test_actor, "CoopPlayer")) return;
+    if (!anim) anim = COOP_ANIM_IDLE;
+    if (ghost.playing == anim) return;
+    uint64_t as = read_ptr(ghost.actor + 0x560);
+    if (!as) return;
+    int i = anim - COOP_ANIM_IDLE;
+    if (!as_names) {
+        uint64_t vt = read_ptr(g_site.coop_string_vtable_slot);
+        if (!vt) return;
+        as_names = hle_alloc(sizeof *as_names * (sizeof sequences / sizeof *sequences));
+        for (unsigned j = 0; j < sizeof sequences / sizeof *sequences; j++) {
+            as_names[j].vtable = vt + 0x10;
+            as_names[j].data = (uintptr_t)as_names[j].name;
+            snprintf(as_names[j].name, sizeof as_names[j].name, "%s", sequences[j]);
+        }
+    }
+    uint64_t result, args[] = {as, (uintptr_t)&as_names[i], UINT32_MAX, UINT32_MAX, 1};
+    if (!call(c, "playAS", g_site.coop_play_as, args, 5, &result)) return;
+    ghost.playing = anim;
+    LOG("[coop] ANIM RX peer=%u state=%d %s\n", ghost.peer, anim, sequences[i]);
+}
+
 static void forget_ghost(const char *why) {
     if (ghost.state != GHOST_NONE) LOG("[coop] LOST %s state=%d\n", why, ghost.state);
     ghost.state = GHOST_NONE;  // (a pending handle's scratch is abandoned, never reused)
     ghost.actor = ghost.creator = 0;
     ghost.wrote = false;
+    ghost.playing = COOP_ANIM_NONE;
 }
 
 static void drain(void) {
@@ -245,6 +345,7 @@ static void drain(void) {
         if (ghost.gone) ghost.n = 0;  // (a returning peer starts a fresh history)
         if (ghost.n == SAMPLES) memmove(ghost.ring, ghost.ring + 1, --ghost.n * sizeof *ghost.ring);
         ghost.ring[ghost.n].ms = now;
+        ghost.ring[ghost.n].anim = e.anim;
         memcpy(ghost.ring[ghost.n++].m, e.m, sizeof e.m);
         ghost.last_ms = now;
         ghost.gone = false;
@@ -253,18 +354,19 @@ static void drain(void) {
 }
 
 // Rendered DELAY_MS behind the newest pose: translation interpolated, newest rotation, no extrapolation.
-static void target_pose(float out[12]) {
+static CoopAnim target_pose(float out[12]) {
     double t = now_ms() - DELAY_MS;
     memcpy(out, ghost.ring[ghost.n - 1].m, 12 * sizeof *out);
     unsigned i = ghost.n - 1;
     while (i && ghost.ring[i - 1].ms > t) i--;
     if (!i || ghost.ring[i].ms <= t) {
         for (int k = 3; k < 12; k += 4) out[k] = ghost.ring[i].m[k];
-        return;
+        return ghost.ring[i].anim;
     }
     double a = ghost.ring[i - 1].ms, b = ghost.ring[i].ms, f = b > a ? (t - a) / (b - a) : 1;
     for (int k = 3; k < 12; k += 4)
         out[k] = (float)(ghost.ring[i - 1].m[k] + f * (ghost.ring[i].m[k] - ghost.ring[i - 1].m[k]));
+    return ghost.ring[i - 1].anim;
 }
 
 // One remote ghost, on the game thread: spawn near Link, place it every update, remove it when the peer goes.
@@ -272,14 +374,19 @@ static void net_update(Cpu *c) {
     drain();
     uint64_t frame = framepace_game_frame();
     if (local.phase == FINISHED) return;
-    if (framepace_title_ui() || framepace_loading_ui()) { forget_ghost("world exit"); return; }
+    if (framepace_title_ui() || framepace_loading_ui()) {
+        forget_ghost("world exit");
+        atomic_store_explicit(&observed_as, 0, memory_order_relaxed);
+        gait.ms = 0;
+        return;
+    }
     if (framepace_paused()) return;
-    uint64_t pi = read_ptr(g_site.player_info), link = pi ? read_ptr(pi + 0x60) : 0;
+    uint64_t link = player();
     float m[12];
     if (!actor_calc(link) || !pose(link, m)) return;
-    if (link != ghost.link) { forget_ghost("Link changed"); ghost.link = link; }
+    if (link != ghost.link) { forget_ghost("Link changed"); ghost.link = link; gait.ms = 0; }
     float xyz[3] = {m[3], m[7], m[11]};
-    coop_net_push(m);
+    coop_net_push(m, local_anim(link, m));
     uint64_t creator = read_ptr(g_site.coop_actor_creator);
     if (ghost.state != GHOST_NONE && creator != ghost.creator) { forget_ghost("ActorCreator changed"); return; }
     bool log = ++ghost.updates % LOG_EVERY == 0;
@@ -323,7 +430,7 @@ static void net_update(Cpu *c) {
         return;
     }
     float want[12];
-    target_pose(want);
+    CoopAnim anim = target_pose(want);
     float at[3] = {want[3], want[7], want[11]};
     if (ghost.state == GHOST_NONE) {
         uint64_t mgr = read_ptr(g_site.coop_heap_mgr);
@@ -339,7 +446,8 @@ static void net_update(Cpu *c) {
             (unsigned long long)frame, test_actor, ghost.peer, at[0], at[1], at[2], xyz[0], xyz[1], xyz[2]);
         return;
     }
-    if (ghost.state != GHOST_ALIVE) return;
+    if (ghost.state != GHOST_ALIVE || !is_actor(ghost.actor, link)) return;
+    animate(c, anim);
     ghost.wrote = control_mem_poke(ghost.actor + 0x398, want, sizeof want);
     memcpy(ghost.put, want, sizeof want);
     if (log) {

@@ -40,6 +40,8 @@
     X(coop_request_actor) \
     X(coop_release_wake) \
     X(coop_delete_actor)     /* BaseProc::deleteLater */ \
+    X(coop_play_as)          /* animation sequence entry */ \
+    X(coop_string_vtable_slot) /* relocated sead::SafeString vtable */ \
     X(ui_control_layer)       /* a UI screen's input layer (runtime/menu_wrap.c) */ \
     X(pouch_lock)             /* native recursive inventory mutex */ \
     X(pouch_unlock)           \

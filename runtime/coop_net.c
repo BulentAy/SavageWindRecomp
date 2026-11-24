@@ -86,9 +86,9 @@ void coop_net_counts(unsigned *sent, unsigned *received) {
     *received = atomic_load(&net.received);
 }
 
-bool coop_net_push(const float m[12]) {
+bool coop_net_push(const float m[12], CoopAnim anim) {
     if (!atomic_load(&net.running) || !room(&net.tx)) return false;
-    CoopNetEvent event = {.received_ms = now_ms()};
+    CoopNetEvent event = {.received_ms = now_ms(), .anim = anim};
     memcpy(event.m, m, sizeof event.m);
     enqueue(&net.tx, &event);
     return true;
@@ -188,13 +188,14 @@ static bool record(Session *s, uint64_t now) {
     uint32_t id = id_of(f[1]);
     // shortcut: one remote at a time, replace with a peer table for multiple actors.
     if (!id || id == s->self || (s->peer && s->peer != id)) return true;
+    CoopNetEvent event = {.type = COOP_NET_POSE, .id = id, .received_ms = now};
     if (n == 15) {
         const char *a = f[14];
         if (!digits(a + (*a == '+' || *a == '-'))) return true;
         long long v = strtoll(a, NULL, 10);
         if (v < INT32_MIN || v > INT32_MAX) return true;
+        if (v >= COOP_ANIM_IDLE && v <= COOP_ANIM_GLIDE) event.anim = (CoopAnim)v;
     }
-    CoopNetEvent event = {.type = COOP_NET_POSE, .id = id, .received_ms = now};
     for (unsigned i = 0; i < 12; i++) {
         const char *num = f[i + 2];
         if (num[strspn(num, "0123456789.eE+-")]) return true;
@@ -280,8 +281,8 @@ static bool step(Session *s, Sock fd, uint64_t now, CoopNetEvent *local) {
     if (s->phase == ONLINE && !s->pending && now >= s->next_tx && local->received_ms &&
         now - local->received_ms <= STALE_MS && valid_pose(local->m)) {
         const float *m = local->m;
-        const char *fmt = "MTX %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g\n";
-#define POSE_ARGS m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]
+        const char *fmt = "MTX %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %d\n";
+#define POSE_ARGS m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], (int)local->anim
 #ifdef _WIN32
         int len = _snprintf_l(s->out, sizeof s->out, fmt, s->numeric, POSE_ARGS);
 #else

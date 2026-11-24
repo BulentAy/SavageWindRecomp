@@ -189,6 +189,16 @@ def main():
     finally:
         gs.SITES = saved
 
+    # The animation bridge is separate: older libraries still support pose-only co-op.
+    anim = {'coop_play_as': BASE + 0x100, 'coop_string_vtable_slot': BASE + 0x2000}
+    try:
+        gs.SITES = [s for s in saved if s.name in anim]
+        check(gs.resolve(b, anim) == anim, 'co-op animation: checked entry and relocated data slot')
+        check(gs.resolve(b, {'coop_play_as': anim['coop_play_as']}) == {}, 'co-op animation: no lone entry')
+        check(gs.resolve(b, dict(anim, coop_string_vtable_slot=BASE + 0x2001)) == {}, 'co-op animation: bad slot')
+    finally:
+        gs.SITES = saved
+
     # ---- versions
     check(gs.supported_version('cd57b23fa4bbad65' + '0' * 48).name == '1.9.0', '1.9.0 by build id')
     check(gs.supported_version('de0b6ac4efc1dda7f80f6d7598ec7a7d' + '0' * 32) is None, '1.8.2 is no longer known')

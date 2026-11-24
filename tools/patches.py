@@ -419,6 +419,13 @@ def _frame_wait(gen, a):
             f'  /* {a:#x}: stp x29, x30, [sp, #-0x30]! (frame wait) */')
 
 
+def _coop_play_as(gen, a):
+    # The AS entry is a thunk to the next instruction; the generated fallthrough keeps that tail call.
+    assert _word(gen, a) == 0x14000001  # b .+4
+    return ('{ extern int g_coop_local; extern void rt_coop_observe_as(Cpu *); '
+            'if (g_coop_local == 2) rt_coop_observe_as(c); }')
+
+
 def _vfr_ratio(gen, a):
     assert _word(gen, a) == 0xb9407a68, hex(_word(gen, a))  # ldr w8, [x19, #0x78]
     return ('{ extern void rt_vfr_update(uint64_t); extern void rt_coop_update(Cpu *); extern int g_coop_local; '
@@ -1243,6 +1250,7 @@ PATCHES = {
     'yaz0_stream': _yaz0_stream,
     'yaz0_stream_ret': _yaz0_stream_ret,
     'vfr_ratio': _vfr_ratio,
+    'coop_play_as': _coop_play_as,
     'gui_speed': _gui_speed,
     'quick_menu_capture_alpha': _quick_menu_capture_alpha,
     'arrow_fall_gravity': _arrow_gravity,

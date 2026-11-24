@@ -34,6 +34,7 @@ static int wire(void) {
         else {
             const float expected[] = {1, 0, 0, 123.5f, 0, 1, 0, -24, 0, 0, 1, 8.25f};
             assert(event.type == COOP_NET_POSE && !memcmp(event.m, expected, sizeof expected));
+            assert((int)event.anim == (poses == 0 ? 104 : 0));
             poses++;
         }
     }
@@ -76,6 +77,7 @@ int main(int argc, char **argv) {
                     float expected[12];
                     pose(expected, other, sample);
                     assert(sample > last && !memcmp(expected, event.m, sizeof expected));
+                    assert((int)event.anim == 101 + sample % 11);
                     last = sample;
                     if (++received == goal) {
                         unsigned tx, rx;
@@ -88,11 +90,11 @@ int main(int argc, char **argv) {
             if (tick % 12 == 0 && coop_net_connected()) {
                 float matrix[12];
                 pose(matrix, me, ++seq);
-                assert(coop_net_push(matrix));
+                assert(coop_net_push(matrix, 101 + seq % 11));
             }
             if (round == 2 && received >= goal && seq >= 12) {
                 coop_net_stop();
-                assert(!coop_net_connected() && !coop_net_push((float[12]){0}));
+                assert(!coop_net_connected() && !coop_net_push((float[12]){0}, 0));
                 assert(coop_net_start());
                 assert(!coop_net_pop(&event));
                 coop_net_stop();

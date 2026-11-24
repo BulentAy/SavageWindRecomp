@@ -38,7 +38,8 @@ def check_wire(client, env):
                     sock.sendall(b"WELCOME\nMT")
                     assert stream.get(timeout=4) == "authenticated"
                     sock.sendall(b"X 7 " + MTX + b"\nMTX 8 " + MTX.replace(b"123.5", b"NaN") +
-                                 b"\nMTX 9 " + MTX + b" -7\nBYE 10\nMTX 10 " + MTX + b"\n" +
+                                 b"\nMTX 9 " + MTX + b" 104\nMTX 9 " + MTX + b" -7\n" +
+                                 b"BYE 10\nMTX 10 " + MTX + b"\n" +
                                  (b"MTX 9 " + MTX + b"\n") * 47 + b"BYE 9\n" + b"X" * 401)
                     assert not sock.recv(1)
                     proc.stdin.write("\n")

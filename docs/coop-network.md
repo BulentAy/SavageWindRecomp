@@ -20,12 +20,21 @@ remote positions, the placed pose and the next-update readback error.
   not encrypt traffic or authenticate the server; captured challenges and
   digests permit offline guessing. Do not publish or port-forward the relay.
 
-The worker authenticates with `HELLO`/`VER`/`AUTH`/`WELCOME`, sends `MTX`
-without an animation field at up to 10 Hz, and receives relay-assigned peer
-IDs. It tracks the first valid remote peer until `BYE` or disconnect; its pose
-expires after two seconds of silence. The host API hands off copied matrices
-via bounded queues; the game-thread caller drains events in order and keeps
-only the latest pose. The worker never accesses guest memory.
+The worker authenticates with `HELLO`/`VER`/`AUTH`/`WELCOME` and sends `MTX`
+at up to 10 Hz. The optional trailing integer carries the sender's locomotion
+state (101–111 in order: idle, walk, run, sprint, jump, fall, climb, climb idle,
+swim, swim idle, glide; 0 means unavailable). The relay forwards it unchanged.
+The sender reads Link's own animation sequence for special movement states and
+uses horizontal speed for the ground gaits. The receiver plays the state at
+its interpolated pose time, changing clips only on transitions. Missing or
+unknown states still place the ghost and play idle. The worker never accesses
+guest memory; it transfers copied poses and states via bounded queues.
+
+The animation bridge is optional and version-pinned to BOTW 1.9.0. Rebuild
+an existing idle-only overlay with `python tools/coop_ghost_assets.py`.
+The new sequences use locally installed Link clips; never share the overlay.
+Climb, swim and glide use representative clips, not the full player animation
+blend graph or a visible paraglider.
 
 To watch two instances on one PC (each with copies of the save and settings,
 windowed at 960x540), build the overlay once and run

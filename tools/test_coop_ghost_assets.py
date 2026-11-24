@@ -68,6 +68,7 @@ def make_romfs(root):
     t.set('Actor/Pack/%s.bactorpack' % g.DONOR, 5000)
     t.set('Actor/ActorLink/%s.bxml' % g.DONOR, 1000)
     t.set('Actor/ASList/MenuASUser.baslist', 2000)
+    t.set('Actor/AS/%s.bas' % g.IDLE[1], 2000)
     t.names['Some/Collided.name'] = 7
     put('System/Resource/ResourceSizeTable.product.srsizetable', g.yaz0_literal(t.write()))
 
@@ -156,7 +157,8 @@ class Build(unittest.TestCase):
         self.assertEqual(users['ModelUser'], 'MenuModelUser')
         self.assertEqual(users['ASUser'], 'Ghost')
         seqs = [[p[2] for p in o[1]] for o in g.Aamp(pack['Actor/ASList/Ghost.baslist']).objects()]
-        self.assertEqual(seqs, [['Alpha', 'FileAlpha'], [g.IDLE[0], g.IDLE[1]], ['Zulu', 'FileZulu']])
+        self.assertEqual([s for s in seqs if not s[0].startswith('Coop')],
+                         [['Alpha', 'FileAlpha'], [g.IDLE[0], g.IDLE[1]], ['Zulu', 'FileZulu']])
         self.assertIn('Actor/ASList/MenuASUser.baslist', pack)
         self.assertEqual(users['AIProgramUser'], 'MonkAIProgramUser')
         for k in g.DUMMY:
@@ -177,6 +179,22 @@ class Build(unittest.TestCase):
         self.assertGreater(t.get('Actor/ASList/Ghost.baslist'), 2000)
         self.assertGreaterEqual(t.get('Actor/Pack/Ghost.bactorpack'), 64 << 10)
         self.assertEqual(t.get('Actor/Pack/%s.bactorpack' % g.DONOR), 5000)
+
+    def test_ghost_aslist_contains_playable_locomotion(self):
+        self.assertEqual(g.main(['--romfs', self.romfs, '--out', self.out]), 0)
+        pack = {n: b for n, b, _ in g.sarc_read(self.read('Actor/Pack/CoopPlayer.sbactorpack'))}
+        seq = {p[0][2]: p[1][2] for _, p in g.Aamp(pack['Actor/ASList/CoopPlayer.baslist']).objects()}
+        rstb = g.Rstb(self.read('System/Resource/ResourceSizeTable.product.srsizetable'))
+        for name, clip in {'CoopWalk': 'Nml_Move_Walk', 'CoopRun': 'Nml_Move_Run',
+                           'CoopSprint': 'Nml_Move_Dash', 'CoopJump': 'Nml_Move_Run_Jump_FootL',
+                           'CoopFall': 'Fall', 'CoopClimb': 'Climb_Wall_Move_U',
+                           'CoopClimbWait': 'Climb_Wall_Wait_FootL', 'CoopSwim': 'Swim_Move_Slow_F',
+                           'CoopSwimWait': 'Swim_Wait', 'CoopGlide': 'Float_Float_F'}.items():
+            path = 'Actor/AS/' + seq[name] + '.bas'
+            self.assertEqual([x[2] for _, p in g.Aamp(pack[path]).objects() for x in p],
+                             [struct.pack('<i', 67), clip])
+            self.assertGreater(rstb.get(path),
+                               len(pack[path]))
 
     def test_refuses_out_inside_romfs(self):
         with self.assertRaises(SystemExit):

@@ -63,6 +63,7 @@ OPT_TWO_SITES = ('opt_two_redraw', 'opt_two_select', 'opt_two_state', 'opt_two_d
 
 COOP_SITES = ('coop_actor_creator', 'coop_heap_mgr', 'coop_get_heap', 'coop_request_actor', 'coop_release_wake',
               'coop_delete_actor')
+COOP_ANIM_SITES = ('coop_play_as', 'coop_string_vtable_slot')
 
 SITES = [
     # Local co-op sites use version-pinned structural patterns, not copied guest opcodes.
@@ -72,6 +73,8 @@ SITES = [
     Site('coop_request_actor', 'entry', '', 0),
     Site('coop_release_wake', 'entry', '', 0),
     Site('coop_delete_actor', 'entry', '', 0),
+    Site('coop_play_as', 'entry', '', 0),
+    Site('coop_string_vtable_slot', 'data_slot', '', 0),
     # Experimental dual binding cells. Every pattern must match; no KNOWN fallback.
     Site('opt_two_redraw', 'code', 'd10103ff a9017bfd a90257f6 a9034ff4 910043fd 90000009/9f00001f 91000129/ffc003ff b9405008', 0),
     Site('opt_two_select', 'code', 'b976b008 7100051f 5400000b/ff00001f a9be7bfd a9014ff4 910003fd 9000000b/9f00001f 9100016b/ffc003ff', 0),
@@ -486,6 +489,7 @@ OPTIONAL_GROUPS = [
      'quick_sort_labels', 'pouch_lock', 'pouch_unlock', 'quick_sort_event', 'quick_sort_player_busy'),
     OPT_TWO_SITES,
     COOP_SITES,
+    COOP_ANIM_SITES,
     ('lookat_update',),  # (the free camera: without it Home does nothing)
     ('gyro_scene_actor',),
     ('surf_contact', 'surf_boost_remove', 'surf_jump_request'),
@@ -533,6 +537,8 @@ KNOWN = {
         'coop_request_actor': 0x7001535b10,
         'coop_release_wake': 0x7001516b74,
         'coop_delete_actor': 0x7001514bac,
+        'coop_play_as': 0x700149f24c,
+        'coop_string_vtable_slot': 0x7001d66260,
         'ui_layout_draw': 0x70013ee084,
         'ui_layout_native': 0x7000f6f690,
         'ui_layout_pane': 0x7000027d30,
@@ -917,6 +923,9 @@ class Main:
 
     def matches_abi(self, kind, address):
         """Structural patterns for version-pinned symbols called directly by the runtime."""
+        if kind == 'data_slot':
+            data, size = self.nso.data
+            return address % 8 == 0 and self.base + data <= address <= self.base + data + size - 8
         if kind == 'bss_slot':
             data, size = self.nso.data
             return address % 8 == 0 and self.base + data + size <= address <= self.base + self.nso.size - 8
@@ -1002,7 +1011,7 @@ def resolve(main, known=None, log=None):
     out, problems = {}, []
     for s in SITES:
         k = (known or {}).get(s.name)
-        if s.name in COOP_SITES:
+        if s.name in COOP_SITES + COOP_ANIM_SITES:
             if k is not None and main.matches_abi(s.kind, k):
                 out[s.name] = k
             continue  # never fall back or infer the actor ABI on an unverified build

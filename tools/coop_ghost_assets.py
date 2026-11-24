@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the co-op spike's idle ghost Link actor from YOUR game's own RomFS, into a RomFS overlay folder.
+"""Build the co-op ghost Link actor from YOUR game's own RomFS, into a RomFS overlay folder.
 
     python tools/coop_ghost_assets.py [--romfs extracted/romfs] [--out build/coop-overlay] [--name CoopPlayer]
 
@@ -7,8 +7,8 @@ then run the game with SAVAGEWIND_ROMFS_OVERLAY=<out> SAVAGEWIND_COOP_TEST=local
 
 The actor is the Sheikah monk's actor pack (Npc_DungeonPriest001: an NPC that just stands and waits) whose ActorLink
 takes the pause-menu Link's model (PauseMenuPlayer), an animation list of its own (the menu Link's, plus the "Wait"
-sequence the monk's AI plays, as the menu's idle animation) and no physics, attention, chemistry or effects (users set
-to Dummy): a Link that is drawn, stands idle and nothing touches. Three files are written:
+sequence the monk's AI plays, as the menu's idle animation) plus locomotion clips and no physics, attention, chemistry or effects (users set
+to Dummy): a Link that is drawn and nothing touches. Three files are written:
 
     Actor/Pack/<name>.sbactorpack                      the new pack (the monk's and the menu Link's resources)
     Actor/ActorInfo.product.sbyml                      the game's actor table plus an entry for <name>
@@ -32,6 +32,12 @@ LOOK = 'PauseMenuPlayer'        # model and animations: the menu's Link
 # a body or reactions
 FROM_LOOK = ('ModelUser', 'ASUser')
 IDLE = ('Wait', 'Player_PauseMenuWait')  # the sequence the monk's AI plays, as the menu Link's idle animation
+LOCOMOTION = {
+    'CoopWalk': 'Nml_Move_Walk', 'CoopRun': 'Nml_Move_Run', 'CoopSprint': 'Nml_Move_Dash',
+    'CoopJump': 'Nml_Move_Run_Jump_FootL', 'CoopFall': 'Fall', 'CoopClimb': 'Climb_Wall_Move_U',
+    'CoopClimbWait': 'Climb_Wall_Wait_FootL', 'CoopSwim': 'Swim_Move_Slow_F',
+    'CoopSwimWait': 'Swim_Wait', 'CoopGlide': 'Float_Float_F',
+}
 DUMMY = ('PhysicsUser', 'AttentionUser', 'ChemicalUser', 'ElinkUser', 'SlinkUser', 'XlinkUser')
 # ActorInfo keys describing the model (the rest stays the monk's)
 MODEL_KEYS = ('bfres', 'mainModel', 'boundingForTraverse', 'aabbMin', 'aabbMax')
@@ -417,6 +423,15 @@ def add_sequence(aslist, seq, filename):
     defines[2] = [[crc('ASDefine_%d' % i), [e[crc('Name')], e[crc('Filename')]]] for i, e in enumerate(entries)]
 
 
+def single_clip(aslist, clip):
+    # A skeletal animation element searches the ASList's existing Player_Animation resource.
+    node = [crc('Parameters'), [[crc('TypeIndex'), 2, struct.pack('<i', 67)], [crc('FileName'), 8, clip]]]
+    anim = Aamp.__new__(Aamp)
+    anim.flags, anim.pio_version, anim.doc_type = aslist.flags, aslist.pio_version, aslist.doc_type
+    anim.root = [aslist.root[0], [[crc('Elements'), [[crc('Element0'), [], [node]]], []]], []]
+    return anim.write()
+
+
 def build_pack(donor, look, name):
     """The new pack's files and, for each file new to the game, (path, the game file whose size entry it starts
     from, that file's length, the new length)."""
@@ -446,8 +461,16 @@ def build_pack(donor, look, name):
     users['ASUser'][2] = name
     out = [f for n, f in files.items() if n not in links]
     out.append(('Actor/ActorLink/%s.bxml' % name, link.write(), files[donor_link][2]))
+    clips = []
+    for seq, clip in LOCOMOTION.items():
+        filename = name + '_' + seq
+        add_sequence(aslist, seq, filename)
+        clips.append(('Actor/AS/%s.bas' % filename, single_clip(aslist, clip), files[idle_as][2]))
     out.append(('Actor/ASList/%s.baslist' % name, aslist.write(), files[look_as][2]))
-    return out, [(n, src, len(files[src][1]), len(d)) for (n, d, _), src in zip(out[-2:], (donor_link, look_as))]
+    derived = [(n, src, len(files[src][1]), len(d)) for (n, d, _), src in zip(out[-2:], (donor_link, look_as))]
+    # The single-clip resource needs its own size entry; use the game's animation parser overhead.
+    derived += [(n, idle_as, len(files[idle_as][1]), len(d)) for n, d, _ in clips]
+    return out + clips, derived
 
 
 def build_actor_info(info, name):

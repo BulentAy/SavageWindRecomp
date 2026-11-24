@@ -86,6 +86,18 @@ static struct {
     unsigned yaw_steps, yaw_still;  // per-update changes counted / below 0.01 degree, since the last TRACK
 } ghost;
 
+// Worn weapons, ours (by slot) and the ghost's: see scan_gear / carry_gear.
+static struct {
+    uint64_t actor[COOP_GEAR_SLOTS];
+    char name[COOP_GEAR_SLOTS][COOP_GEAR_NAME];
+    float logged[COOP_GEAR_SLOTS][3];  // relative position last logged (a move of 30 cm is logged: drawn/sheathed)
+} worn;
+static struct {
+    struct { uint64_t actor, woke; char name[COOP_GEAR_NAME]; bool off; } slot[COOP_GEAR_SLOTS];
+    unsigned pending;  // 1 + the slot whose creation is pending, 0 none
+    uint64_t deadline;
+} carried;
+
 int g_coop_local;  // 1: local test, 2: network ghost (patches.py _vfr_ratio calls rt_coop_update while set)
 
 RT_ON_RESET(coop_reset) {
@@ -97,6 +109,8 @@ RT_ON_RESET(coop_reset) {
     memset(&gait, 0, sizeof gait);
     memset(&local, 0, sizeof local);
     memset(&ghost, 0, sizeof ghost);
+    memset(&worn, 0, sizeof worn);
+    memset(&carried, 0, sizeof carried);
 }
 
 void coop_start(bool net) {
@@ -449,6 +463,7 @@ static void forget_ghost(const char *why) {
     ghost.playing[0] = 0;
     memset(ghost.piece, 0, sizeof ghost.piece);
     ghost.pending = 0;
+    memset(&carried, 0, sizeof carried);
 }
 
 static bool delete_actor(Cpu *c, uint64_t actor) {
@@ -494,6 +509,148 @@ static void spawn_pieces(Cpu *c, uint64_t creator, uint64_t frame, const float a
         ghost.piece_deadline = frame + 600;
         return;
     }
+}
+
+// ---- Worn weapons (WPN records) ------------------------------------------------------------------------------
+// Sender: the Weapon_* actors riding on Link (sword, sheath, shield, bow, quiver: separate actors the game keeps
+// on Link's bones), each as its pose in Link's frame, so the record says "on the back" or "in the hand" by itself.
+// Receiver: one CoopW_<kind>_<n> actor per worn weapon (tools/coop_ghost_assets.py), placed every update at
+// ghost pose x that relative pose; replaced when the name changes, deleted with the ghost.
+// r = L^-1 w (both rigid 3x4)
+static void relative(const float l[12], const float w[12], float r[12]) {
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) r[i * 4 + j] = l[i] * w[j] + l[4 + i] * w[4 + j] + l[8 + i] * w[8 + j];
+        r[i * 4 + 3] = l[i] * (w[3] - l[3]) + l[4 + i] * (w[7] - l[7]) + l[8 + i] * (w[11] - l[11]);
+    }
+}
+
+// out = g r
+static void compose(const float g[12], const float r[12], float out[12]) {
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 4; j++)
+            out[i * 4 + j] = g[i * 4] * r[j] + g[i * 4 + 1] * r[4 + j] + g[i * 4 + 2] * r[8 + j] + (j == 3) * g[i * 4 + 3];
+}
+
+static void scan_gear(uint64_t link, const float l[12]) {
+    uint64_t creator = read_ptr(g_site.coop_actor_creator), sentinel = creator + 0x38;
+    uint32_t meta[2];
+    if (!creator || !control_mem_peek(sentinel + 0x10, meta, sizeof meta) || meta[0] > 20000 || meta[1] > 0x2000 ||
+        (meta[1] & 7)) return;
+    enum { MAX = 2 * COOP_GEAR_SLOTS };
+    struct { uint64_t actor; CoopGear g; } seen[MAX];
+    unsigned n = 0;
+    uint64_t node = read_ptr(sentinel + 8);
+    for (unsigned i = 0; i < meta[0] && node && node != sentinel && n < MAX; i++, node = read_ptr(node + 8)) {
+        uint64_t a = node - meta[1];
+        char name[COOP_GEAR_NAME];
+        float w[12];
+        if (a == link || !control_mem_peek(a + 0x1c, name, sizeof name) || memcmp(name, "Weapon_", 7) ||
+            !memchr(name, 0, sizeof name) || !actor_calc(a) || !pose(a, w)) continue;
+        relative(l, w, seen[n].g.m);
+        const float *r = seen[n].g.m;
+        // shortcut: "on Link" = near his axis and off the ground (a weapon on a rack at chest height passes too);
+        // check the pouch's equipped items if that shows up.
+        if (hypotf(r[3], r[11]) > 0.9f || r[7] < 0.3f || r[7] > 2.2f) continue;
+        memcpy(seen[n].g.name, name, sizeof name);
+        seen[n++].actor = a;
+    }
+    // An actor keeps its slot while it stays on Link; new ones take the free slots.
+    uint64_t next[COOP_GEAR_SLOTS] = {0};
+    CoopGear gear[COOP_GEAR_SLOTS] = {0};
+    for (unsigned k = 0; k < n; k++)
+        for (int s = 0; s < COOP_GEAR_SLOTS; s++)
+            if (seen[k].actor && worn.actor[s] == seen[k].actor) { next[s] = seen[k].actor; gear[s] = seen[k].g; seen[k].actor = 0; }
+    for (unsigned k = 0; k < n; k++)
+        for (int s = 0; seen[k].actor && s < COOP_GEAR_SLOTS; s++)
+            if (!next[s]) { next[s] = seen[k].actor; gear[s] = seen[k].g; seen[k].actor = 0; }
+    for (int s = 0; s < COOP_GEAR_SLOTS; s++) {
+        const float *r = gear[s].m, *was = worn.logged[s];
+        if (strcmp(worn.name[s], gear[s].name) ||
+            (gear[s].name[0] && hypotf(hypotf(r[3] - was[0], r[7] - was[1]), r[11] - was[2]) > 0.3f)) {
+            LOG("[coop] GEAR TX slot=%d %s rel=(%.2f,%.2f,%.2f)\n", s, gear[s].name[0] ? gear[s].name : "-", r[3], r[7],
+                r[11]);
+            memcpy(worn.name[s], gear[s].name, sizeof worn.name[s]);
+            worn.logged[s][0] = r[3], worn.logged[s][1] = r[7], worn.logged[s][2] = r[11];
+        }
+        worn.actor[s] = next[s];
+    }
+    coop_net_set_gear(gear);
+}
+
+static const char *gear_actor(const char *weapon) {  // Weapon_Sword_001 -> CoopW_Sword_001
+    static char name[COOP_GEAR_NAME];
+    snprintf(name, sizeof name, "CoopW%s", weapon + 6);
+    return name;
+}
+
+// Finishes a pending creation; true while it is still pending.
+static bool gear_wake(Cpu *c, uint64_t frame) {
+    if (!carried.pending) return false;
+    int s = carried.pending - 1;
+    uint64_t actor;
+    int r = wake(c, frame, &actor, true);
+    if (!r && frame <= carried.deadline) return true;
+    carried.pending = 0;
+    if (r <= 0) {
+        carried.slot[s].off = true;
+        if (!r) LOG("[coop] GEAR FAIL %s confirmation timed out\n", gear_actor(carried.slot[s].name));
+        return false;
+    }
+    carried.slot[s].actor = actor;
+    carried.slot[s].woke = frame;
+    LOG("[coop] GEAR ALIVE update=%llu slot=%d %s\n", (unsigned long long)frame, s, gear_actor(carried.slot[s].name));
+    return false;
+}
+
+static bool delete_gear(Cpu *c) {
+    for (int s = 0; s < COOP_GEAR_SLOTS; s++) {
+        uint64_t a = carried.slot[s].actor;
+        if (a && !delete_actor(c, a)) return false;  // (like the pieces: a lost one was already cleared)
+        carried.slot[s].actor = 0;
+    }
+    return true;
+}
+
+// The ghost's weapons, each update while it is alive and placed at g.
+static void carry_gear(Cpu *c, uint64_t creator, uint64_t frame, uint64_t link, const float g[12]) {
+    CoopGear in[COOP_GEAR_SLOTS];
+    if (coop_net_peer_gear(in) != ghost.peer) memset(in, 0, sizeof in);
+    gear_wake(c, frame);
+    int request_slot = -1;
+    for (int s = 0; s < COOP_GEAR_SLOTS; s++) {
+        typeof(carried.slot[0]) *sl = &carried.slot[s];
+        if (carried.pending == (unsigned)s + 1) continue;  // (its name is fixed until the creation ends)
+        // (a woken actor reaches Calc a few updates later)
+        if (sl->actor && frame > sl->woke + 30 && !is_named(sl->actor, link, gear_actor(sl->name))) {
+            LOG("[coop] GEAR LOST slot=%d %s\n", s, gear_actor(sl->name));
+            sl->actor = 0;
+            sl->off = true;
+        }
+        if (strcmp(sl->name, in[s].name)) {
+            if (sl->actor && !delete_actor(c, sl->actor)) return;
+            LOG("[coop] GEAR RX peer=%u slot=%d %s -> %s\n", ghost.peer, s, sl->name[0] ? sl->name : "-",
+                in[s].name[0] ? in[s].name : "-");
+            sl->actor = 0;
+            sl->off = false;
+            memcpy(sl->name, in[s].name, sizeof sl->name);
+        }
+        if (sl->actor && frame > sl->woke) {
+            float at[12];
+            compose(g, in[s].m, at);
+            control_mem_poke(sl->actor + 0x398, at, sizeof at);
+        } else if (!sl->actor && sl->name[0] && !sl->off && request_slot < 0) request_slot = s;
+    }
+    uint64_t mgr = read_ptr(g_site.coop_heap_mgr);
+    if (request_slot < 0 || carried.pending || ghost.pending || !mgr) return;
+    float at[12];
+    compose(g, in[request_slot].m, at);
+    const float xyz[3] = {at[3], at[7], at[11]};
+    if (!request(c, creator, mgr, xyz, gear_actor(carried.slot[request_slot].name), true)) {
+        carried.slot[request_slot].off = true;
+        return;
+    }
+    carried.pending = request_slot + 1;
+    carried.deadline = frame + 600;
 }
 
 static void drain(void) {
@@ -593,6 +750,7 @@ static void net_update(Cpu *c) {
         strcpy(gait.last_clip, clip.name);
     }
     coop_net_push(m, anim, &clip);
+    if (frame % 3 == 0) scan_gear(link, m);
     uint64_t creator = read_ptr(g_site.coop_actor_creator);
     if (ghost.state != GHOST_NONE && creator != ghost.creator) { forget_ghost("ActorCreator changed"); return; }
     bool log = ++ghost.updates % LOG_EVERY == 0;
@@ -600,7 +758,8 @@ static void net_update(Cpu *c) {
     if (ghost.state == GHOST_ALIVE) {
         if (!is_actor(ghost.actor, link) || (ghost.updates % 30 == 0 && !listed(creator, ghost.actor))) {
             if (ghost.pending) { spawn_pieces(c, creator, frame, NULL); return; }  // (no piece left behind)
-            if (!delete_pieces(c)) return;
+            if (gear_wake(c, frame)) return;
+            if (!delete_pieces(c) || !delete_gear(c)) return;
             forget_ghost("ghost no longer listed/Calc");
             return;
         }
@@ -619,7 +778,8 @@ static void net_update(Cpu *c) {
         }
         if (ghost.gone) {
             if (ghost.pending) { spawn_pieces(c, creator, frame, NULL); return; }
-            if (!delete_pieces(c) || !delete_actor(c, ghost.actor)) return;
+            if (gear_wake(c, frame)) return;
+            if (!delete_pieces(c) || !delete_gear(c) || !delete_actor(c, ghost.actor)) return;
             LOG("[coop] REMOVE update=%llu peer=%u silent_ms=%.0f\n", (unsigned long long)frame, ghost.peer,
                 now_ms() - ghost.last_ms);
             forget_ghost("removed");
@@ -678,7 +838,10 @@ static void net_update(Cpu *c) {
     for (int p = 0; p < PIECES; p++)
         if (ghost.piece[p].actor) control_mem_poke(ghost.piece[p].actor + 0x398, want, sizeof want);
     memcpy(ghost.put, want, sizeof want);
-    if (anim_bridge && !strcmp(test_actor, "CoopPlayer")) spawn_pieces(c, creator, frame, at);
+    if (anim_bridge && !strcmp(test_actor, "CoopPlayer")) {
+        if (!carried.pending) spawn_pieces(c, creator, frame, at);
+        carry_gear(c, creator, frame, link, want);
+    }
     if (log) {
         unsigned tx, rx;
         coop_net_counts(&tx, &rx);

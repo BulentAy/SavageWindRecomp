@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Savage Wind v5 MTX relay. Use only on a trusted LAN or private VPN."""
+"""Savage Wind v5 MTX/WPN relay. Use only on a trusted LAN or private VPN."""
 import argparse
 import asyncio
 import hashlib
@@ -17,6 +17,9 @@ MAX_PENDING = 16 * 1024
 DECIMAL = re.compile(rb"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
 INTEGER = re.compile(rb"[+-]?[0-9]+")
 CLIP = re.compile(rb"[A-Za-z0-9_]{1,63}")
+WEAPON = re.compile(rb"Weapon_[A-Za-z0-9_]{1,16}")
+GEAR_SLOTS = 6
+GEAR_REACH = 4.0
 
 
 def matrix(fields):
@@ -40,6 +43,16 @@ def matrix(fields):
     a, b, c = rows
     return sum(a[i] * (b[(i + 1) % 3] * c[(i + 2) % 3] - b[(i + 2) % 3] * c[(i + 1) % 3])
                for i in range(3)) > 0
+
+
+def gear(fields):
+    """WPN <slot> - | WPN <slot> <Weapon_ name> <3x4 pose in the sender's Link frame, within GEAR_REACH m>"""
+    if len(fields) not in (2, 14) or fields[0] not in [str(i).encode() for i in range(GEAR_SLOTS)]:
+        return False
+    if len(fields) == 2:
+        return fields[1] == b"-"
+    return bool(WEAPON.fullmatch(fields[1])) and matrix(fields[2:]) and \
+        all(abs(float(fields[2 + i])) <= GEAR_REACH for i in (3, 7, 11))
 
 
 async def read_fields(reader):
@@ -99,9 +112,9 @@ async def serve(host, port, password):
                 last = t
                 if tokens < 0:
                     return
-                if fields[:1] != [b"MTX"] or not matrix(fields[1:]):
+                if not (fields[:1] == [b"MTX"] and matrix(fields[1:]) or fields[:1] == [b"WPN"] and gear(fields[1:])):
                     continue
-                line = b" ".join((b"MTX", pid, *fields[1:])) + b"\n"
+                line = b" ".join((fields[0], pid, *fields[1:])) + b"\n"
                 if len(line) <= MAX_LINE + 1:
                     broadcast(writer, line)
         except (OSError, ValueError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):

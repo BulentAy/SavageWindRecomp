@@ -35,3 +35,16 @@ bool coop_net_push(const float m[12], CoopAnim anim, const CoopClip *clip);
 bool coop_net_pop(CoopNetEvent *event);
 // MTX records handed to the socket / valid remote poses queued, since start (diagnostics).
 void coop_net_counts(unsigned *sent, unsigned *received);
+
+// Worn weapons (WPN records): the Weapon_* actors on a Link, each with its pose in that Link's frame (row-major
+// 3x4, |translation| <= COOP_GEAR_REACH m), so a ghost carries them on its back or in its hand. Name "" = empty.
+enum { COOP_GEAR_SLOTS = 6, COOP_GEAR_NAME = 24 };
+#define COOP_GEAR_REACH 4.0f
+typedef struct {
+    char name[COOP_GEAR_NAME];
+    float m[12];
+} CoopGear;
+// Game thread: our current gear (sent by the worker, changed slots first). Copies under a short lock.
+void coop_net_set_gear(const CoopGear gear[COOP_GEAR_SLOTS]);
+// The current remote peer's gear; returns its id, 0 when none (cleared when it leaves).
+uint32_t coop_net_peer_gear(CoopGear gear[COOP_GEAR_SLOTS]);

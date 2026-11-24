@@ -97,6 +97,35 @@ bool coop_net_push(const float m[12], CoopAnim anim, const CoopClip *clip) {
 
 bool coop_net_pop(CoopNetEvent *event) { return dequeue(&net.rx, event); }
 
+// Worn weapons: the latest table each way (newest wins, nothing queued), under a lock held only for a copy.
+static struct {
+    pthread_mutex_t lock;
+    CoopGear out[COOP_GEAR_SLOTS], in[COOP_GEAR_SLOTS];
+    uint32_t in_peer;
+} gear = {.lock = PTHREAD_MUTEX_INITIALIZER};
+
+void coop_net_set_gear(const CoopGear g[COOP_GEAR_SLOTS]) {
+    pthread_mutex_lock(&gear.lock);
+    memcpy(gear.out, g, sizeof gear.out);
+    pthread_mutex_unlock(&gear.lock);
+}
+
+uint32_t coop_net_peer_gear(CoopGear g[COOP_GEAR_SLOTS]) {
+    pthread_mutex_lock(&gear.lock);
+    memcpy(g, gear.in, sizeof gear.in);
+    uint32_t peer = gear.in_peer;
+    pthread_mutex_unlock(&gear.lock);
+    return peer;
+}
+
+static void gear_reset(bool out) {
+    pthread_mutex_lock(&gear.lock);
+    memset(gear.in, 0, sizeof gear.in);
+    gear.in_peer = 0;
+    if (out) memset(gear.out, 0, sizeof gear.out);
+    pthread_mutex_unlock(&gear.lock);
+}
+
 static bool digits(const char *s) { return *s && s[strspn(s, "0123456789")] == 0; }
 
 static uint32_t id_of(const char *s) {
@@ -122,8 +151,9 @@ typedef struct {
     enum { CONNECTING, HELLO, WELCOME, ONLINE } phase;
     uint32_t self, peer;
     bool present;
-    uint64_t deadline, last_pose, next_tx, tx_deadline;
-    unsigned used, sent, pending;
+    uint64_t deadline, last_pose, next_tx, tx_deadline, next_gear;
+    unsigned used, sent, pending, gear_turn;
+    CoopGear gear_sent[COOP_GEAR_SLOTS];
     char line[LINE_MAX_BYTES + 1], out[LINE_MAX_BYTES + 2];
 #ifdef _WIN32
     _locale_t numeric;
@@ -135,6 +165,95 @@ static void leave(Session *s, uint64_t now) {
     CoopNetEvent event = {.type = COOP_NET_LEFT, .id = s->peer, .received_ms = now};
     enqueue(&net.rx, &event);
     s->present = false;
+    gear_reset(false);
+}
+
+// "Weapon_" and 1..16 letters, digits or _ (the game's weapon, sheath, bow and shield actor names).
+static bool gear_name(const char *name) {
+    size_t n = strlen(name);
+    return n > 7 && n < COOP_GEAR_NAME && !strncmp(name, "Weapon_", 7) &&
+           strspn(name + 7, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_") == n - 7;
+}
+
+static bool gear_pose(const float m[12]) {
+    return valid_pose(m) && fabsf(m[3]) <= COOP_GEAR_REACH && fabsf(m[7]) <= COOP_GEAR_REACH &&
+           fabsf(m[11]) <= COOP_GEAR_REACH;
+}
+
+static bool wire_float(Session *s, const char *num, float *out) {
+    if (num[strspn(num, "0123456789.eE+-")]) return false;
+    char *end;
+#ifdef _WIN32
+    double v = _strtod_l(num, &end, s->numeric);
+#else
+    (void)s;
+    double v = strtod(num, &end);
+#endif
+    if (*end || end == num || !(fabs(v) <= 100000.0)) return false;
+    *out = (float)v;
+    return true;
+}
+
+// WPN <id> <slot> - | WPN <id> <slot> <name> <12 numbers>, from the remote whose poses we follow.
+static void gear_record(Session *s, char **f, unsigned n) {
+    // shortcut: one remote at a time, like MTX; a peer table comes with multiple ghosts.
+    if ((n != 4 && n != 16) || !s->peer || id_of(f[1]) != s->peer || strlen(f[2]) != 1 || f[2][0] < '0' ||
+        f[2][0] >= '0' + COOP_GEAR_SLOTS) return;
+    CoopGear g = {0};
+    if (n == 4 && strcmp(f[3], "-")) return;
+    if (n == 16) {
+        if (!gear_name(f[3])) return;
+        for (unsigned i = 0; i < 12; i++)
+            if (!wire_float(s, f[i + 4], &g.m[i])) return;
+        if (!gear_pose(g.m)) return;
+        strcpy(g.name, f[3]);
+    }
+    pthread_mutex_lock(&gear.lock);
+    if (gear.in_peer != s->peer) {
+        memset(gear.in, 0, sizeof gear.in);
+        gear.in_peer = s->peer;
+    }
+    gear.in[f[2][0] - '0'] = g;
+    pthread_mutex_unlock(&gear.lock);
+}
+
+static bool gear_moved(const CoopGear *a, const CoopGear *b) {
+    if (strcmp(a->name, b->name)) return true;
+    for (int i = 0; a->name[0] && i < 12; i++)
+        if (fabsf(a->m[i] - b->m[i]) > (i % 4 == 3 ? 0.02f : 0.03f)) return true;
+    return false;
+}
+
+// One WPN record into s->out: a changed slot first, else the next worn one in turn (a late peer's refresh).
+// Returns the length (0: nothing to send, < 0: error) and whether a slot had changed.
+static int gear_line(Session *s, bool *changed) {
+    CoopGear now[COOP_GEAR_SLOTS];
+    pthread_mutex_lock(&gear.lock);
+    memcpy(now, gear.out, sizeof now);
+    pthread_mutex_unlock(&gear.lock);
+    int slot = -1;
+    for (unsigned k = 0; k < COOP_GEAR_SLOTS; k++) {
+        unsigned i = (s->gear_turn + k) % COOP_GEAR_SLOTS;
+        now[i].name[COOP_GEAR_NAME - 1] = 0;
+        if (now[i].name[0] && (!gear_name(now[i].name) || !gear_pose(now[i].m))) memset(&now[i], 0, sizeof now[i]);
+        if (slot < 0 && gear_moved(&now[i], &s->gear_sent[i])) slot = (int)i;
+    }
+    *changed = slot >= 0;
+    for (unsigned k = 0; slot < 0 && k < COOP_GEAR_SLOTS; k++)
+        if (now[(s->gear_turn + k) % COOP_GEAR_SLOTS].name[0]) slot = (int)((s->gear_turn + k) % COOP_GEAR_SLOTS);
+    if (slot < 0) return 0;
+    s->gear_turn = (unsigned)slot + 1;
+    s->gear_sent[slot] = now[slot];
+    const float *m = now[slot].m;
+    if (!now[slot].name[0]) return snprintf(s->out, sizeof s->out, "WPN %d -\n", slot);
+    const char *fmt = "WPN %d %s %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g\n";
+#define GEAR_ARGS slot, now[slot].name, m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]
+#ifdef _WIN32
+    return _snprintf_l(s->out, sizeof s->out, fmt, s->numeric, GEAR_ARGS);
+#else
+    return snprintf(s->out, sizeof s->out, fmt, GEAR_ARGS);
+#endif
+#undef GEAR_ARGS
 }
 
 static void auth(Session *s, const char *challenge) {
@@ -184,6 +303,10 @@ static bool record(Session *s, uint64_t now) {
     if (n == 2 && !strcmp(f[0], "BYE") && s->peer && id_of(f[1]) == s->peer) {
         leave(s, now);
         s->peer = 0;
+    }
+    if (n >= 3 && !strcmp(f[0], "WPN")) {
+        gear_record(s, f, n);
+        return true;
     }
     if ((n != 14 && n != 15 && n != 17) || strcmp(f[0], "MTX")) return true;
     uint32_t id = id_of(f[1]);
@@ -323,6 +446,17 @@ static bool step(Session *s, Sock fd, uint64_t now, CoopNetEvent *local) {
         s->tx_deadline = now + TIMEOUT_MS;
         local->received_ms = 0;
     }
+    if (s->phase == ONLINE && !s->pending && now >= s->next_gear) {
+        bool changed;
+        int len = gear_line(s, &changed);
+        if (len < 0 || len > LINE_MAX_BYTES + 1) return false;
+        s->next_gear = now + (changed ? POSE_MS : 3 * POSE_MS);  // with MTX at most 20 records/s
+        if (len) {
+            s->sent = 0;
+            s->pending = (unsigned)len;
+            s->tx_deadline = now + TIMEOUT_MS;
+        }
+    }
     if (s->pending) {
         if (s->phase == ONLINE && now >= s->tx_deadline) return false;
         int sent = send(fd, s->out + s->sent, s->pending - s->sent, SEND_FLAGS);
@@ -444,6 +578,7 @@ bool coop_net_start(void) {
     atomic_store(&net.rx.tail, 0);
     atomic_store(&net.sent, 0);
     atomic_store(&net.received, 0);
+    gear_reset(true);
     atomic_store(&net.running, true);
     if (!pthread_create(&net.thread, NULL, worker, NULL)) { ok = true; goto done; }
     atomic_store(&net.running, false);

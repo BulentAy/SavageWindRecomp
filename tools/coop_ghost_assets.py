@@ -14,6 +14,8 @@ sequences), which the game places and animates together with it. Files written:
 
     Actor/Pack/<name>.sbactorpack                      the new pack (the monk's and the menu Link's resources)
     Actor/Pack/<name><piece>.sbactorpack               one per worn piece (PIECES)
+    Actor/Pack/CoopW_<kind>_<n>.sbactorpack             one per Weapon_<kind>_<n> pack with a model: what a
+                                                       remote player's ghost carries (sword, sheath, shield, bow...)
     Actor/ActorInfo.product.sbyml                      the game's actor table plus an entry for <name>
     System/Resource/ResourceSizeTable.product.srsizetable  the size table plus entries for the new files
 
@@ -47,6 +49,11 @@ DUMMY = ('PhysicsUser', 'AttentionUser', 'ChemicalUser', 'ElinkUser', 'SlinkUser
 MODEL_KEYS = ('bfres', 'mainModel', 'boundingForTraverse', 'aabbMin', 'aabbMax', 'actorScale')
 # worn pieces, actor <name><key>: a bare head's hair (Link's own), Champion's Tunic, Hylian Trousers
 PIECES = {'Hair': 'Armor_Default_Head', 'Upper': 'Armor_148_Upper', 'Lower': 'Armor_001_Lower'}
+# Weapon_Sword_001 -> CoopW_Sword_001 (runtime/hle/coop.c gear_actor): the weapon's model, the ghost's sequences
+# (a rigid model ignores Link's clips), or for a weapon with a skeleton of its own (a Bokoblin arm) its own list
+# with the monk AI's "Wait" playing its held pose, "Equiped". (Bows with a skeleton share the bows' animation.)
+GEAR_PREFIX = 'CoopW'
+HELD_POSE = 'Equiped'
 INST_SIZE = 700000      # actor heap; the monk's is sized for its own model, Link's needs more
 TRAVERSE_DIST = 99999   # never unloaded for distance while it stands next to the player
 
@@ -537,6 +544,25 @@ def build_actor_info(info, name, look_name=LOOK):
     return info
 
 
+def weapon_anim(files, weapon, name, ghost_anim):
+    """The sequences a weapon copy plays, and the size entries of a list made for it; None: no model to draw"""
+    users = link_target(Aamp(files['Actor/ActorLink/%s.bxml' % weapon][1]))
+    if 'ModelUser' not in users or users['ModelUser'][2] == 'Dummy':
+        return None
+    as_user = users['ASUser'][2] if 'ASUser' in users else 'Dummy'
+    src = 'Actor/ASList/%s.baslist' % as_user
+    if as_user == 'Dummy' or src not in files or weapon.startswith('Weapon_Bow_'):
+        return ghost_anim, []
+    aslist = Aamp(files[src][1])
+    held = [q[crc('Filename')][2] for q in ({x[0]: x for x in p} for _, p in aslist.objects())
+            if crc('Name') in q and crc('Filename') in q and q[crc('Name')][2] == HELD_POSE]
+    if not held:
+        return ghost_anim, []
+    add_sequence(aslist, 'Wait', held[0])
+    new = ('Actor/ASList/%s.baslist' % name, aslist.write(), files[src][2])
+    return (name, [new]), [(new[0], src, len(files[src][1]), len(new[1]))]
+
+
 def rsize(n):
     return (n + 31) & ~31
 
@@ -560,6 +586,24 @@ def build(romfs, out_dir, name):
         piece_files, piece_derived = build_pack(donor, yaz0_decompress(read(pack_rel % piece)), name + key, piece, anim)
         packs[name + key] = sarc_write(piece_files)
         derived += piece_derived
+    weapons = {}  # copy name: weapon
+    for f in sorted(os.listdir(os.path.join(romfs, 'Actor', 'Pack'))):
+        weapon = f[:-len('.sbactorpack')]
+        if not (f.startswith('Weapon_') and f.endswith('.sbactorpack')):
+            continue
+        copy = GEAR_PREFIX + weapon[len('Weapon'):]
+        pack = yaz0_decompress(read(pack_rel % weapon))
+        try:
+            plays = weapon_anim({n: (n, d, a) for n, d, a in sarc_read(pack)}, weapon, copy, anim)
+            if plays is None:
+                continue
+            weapon_files, weapon_derived = build_pack(donor, pack, copy, weapon, plays[0])
+        except (KeyError, ValueError) as e:  # (a pack unlike the others: no copy, the ghost just lacks it)
+            print('coop_ghost_assets: skipped %s: %s' % (weapon, e), file=sys.stderr)
+            continue
+        packs[copy] = sarc_write(weapon_files)
+        derived += weapon_derived + plays[1]
+        weapons[copy] = weapon
 
     info_z = read(info_rel)
     info_raw = yaz0_decompress(info_z)
@@ -568,6 +612,8 @@ def build(romfs, out_dir, name):
     info = build_actor_info(info_doc.parse(), name)
     for key, piece in PIECES.items():
         build_actor_info(info, name + key, piece)
+    for copy, weapon in weapons.items():
+        build_actor_info(info, copy, weapon)
     info_new = byml_write(info, version)
 
     table = Rstb(yaz0_decompress(read(rstb_rel)))
@@ -603,7 +649,7 @@ def build(romfs, out_dir, name):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'wb') as f:
             f.write(blob)
-    return written, sizes, len(files)
+    return written, sizes, len(files), len(weapons)
 
 
 def inside(path, parent):
@@ -626,15 +672,17 @@ def main(argv=None):
     if inside(a.out, a.romfs) or inside(a.romfs, a.out):
         ap.error('--out must be outside the RomFS')
     try:
-        written, sizes, n = build(a.romfs, a.out, a.name)
+        written, sizes, n, weapons = build(a.romfs, a.out, a.name)
     except (OSError, ValueError, KeyError) as e:
         print('coop_ghost_assets: %s' % e, file=sys.stderr)
         return 1
-    print('%s: %d files in the pack' % (a.name, n))
+    print('%s: %d files in the pack, %d weapon copies (%s*)' % (a.name, n, weapons, GEAR_PREFIX))
     for rel, blob in written.items():
-        print('  %-56s %9d bytes' % (rel, len(blob)))
+        if not rel.startswith('Actor/Pack/' + GEAR_PREFIX + '_'):
+            print('  %-56s %9d bytes' % (rel, len(blob)))
     for rel, size in sizes.items():
-        print('  RSTB %-51s %9d' % (rel, size))
+        if GEAR_PREFIX + '_' not in rel:
+            print('  RSTB %-51s %9d' % (rel, size))
     print('overlay: %s' % os.path.abspath(a.out))
     return 0
 

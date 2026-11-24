@@ -39,6 +39,7 @@ def check_wire(client, env):
                     assert stream.get(timeout=4) == "authenticated"
                     sock.sendall(b"X 7 " + MTX + b"\nMTX 8 " + MTX.replace(b"123.5", b"NaN") +
                                  b"\nMTX 9 " + MTX + b" 104\nMTX 9 " + MTX + b" -7\n" +
+                                 b"WPN 9 1 Weapon_Sword_001 " + MTX + b"\nWPN 9 7 -\nWPN 9\nWPN 9 1 Bad! -\n" +
                                  b"BYE 10\nMTX 10 " + MTX + b"\n" +
                                  (b"MTX 9 " + MTX + b"\n") * 47 + b"BYE 9\n" + b"X" * 401)
                     assert not sock.recv(1)
@@ -48,7 +49,7 @@ def check_wire(client, env):
             finally:
                 if proc.poll() is None:
                     proc.kill()
-    print("native framing, UTF-8 auth, self/extra peer filtering, overflow and BYE: OK", flush=True)
+    print("native framing, UTF-8 auth, self/extra peer filtering, bad WPN ignored, overflow and BYE: OK", flush=True)
 
 
 def main():
@@ -78,7 +79,7 @@ def main():
                        args=(proc.stdout, stream), daemon=True).start()
             for stream in streams:
                 assert stream.get(timeout=24) == "round=1 exact=100"
-            print("100 exact matrices each way: OK", flush=True)
+            print("100 exact matrices and a worn sword each way: OK", flush=True)
         for stream in streams:
             assert stream.get(timeout=8) == "disconnected"
         with relay(port):

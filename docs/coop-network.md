@@ -35,6 +35,26 @@ from the local RomFS and disables only the ghost NPC's automatic name label.
 Never share the overlay. The strongest skeletal clip is mirrored, not the
 full blend of simultaneous clips, secondary layers or foot IK.
 
+Worn weapons travel as `WPN <slot> <Weapon_name> <3x4 pose>` (or `WPN <slot> -`
+for an emptied slot; slots 0–5). The sender finds the `Weapon_*` actors the
+game keeps on its Link (sword, sheath, shield, bow, quiver; near Link's axis and
+off the ground) and sends each one's pose in Link's frame, so the same record
+puts it on the back or in the hand. Changed slots go first, at most 10 records
+per second, and worn slots are repeated about every 2 s for a late peer. The
+relay forwards valid records as `WPN <id> ...` (name `Weapon_` plus up to 16
+letters, digits or `_`, rigid rotation, translation within 4 m); older clients
+ignore them. The receiver places a `CoopW_<kind>_<n>` copy (built by
+`tools/coop_ghost_assets.py` from each weapon pack with a model) at the
+ghost's pose times that relative pose every update, replaces it when the name
+changes and deletes it with the ghost. A weapon with its own skeleton (Bokoblin
+arms) plays its held pose, `Equiped`.
+
+The animation bridge is optional and version-pinned to BOTW 1.9.0. Rebuild
+an existing idle-only overlay with `python tools/coop_ghost_assets.py`.
+The new sequences use locally installed Link clips; never share the overlay.
+Climb, swim and glide use representative clips, not the full player animation
+blend graph or a visible paraglider.
+
 To watch two instances on one PC (each with copies of the save and settings,
 windowed at 960x540), build the overlay once and run
 `python tools/coop_duo_local.py --save <save folder> --settings <savagewind.ini>`.

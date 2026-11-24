@@ -73,7 +73,15 @@ def make_romfs(root):
         put('Actor/Pack/%s.sbactorpack' % piece, g.yaz0_literal(g.sarc_write([
             ('Actor/ActorLink/%s.bxml' % piece, actor_link(**{u: piece + u for u in USERS}), 4),
             ('Actor/ModelList/%s.bmodellist' % piece, b'ML', 4)])))
-    names = sorted([g.DONOR, g.LOOK, 'Zz', *g.PIECES.values()], key=g.crc)
+    weapons = {'Weapon_Sword_001': 'Dummy', 'Weapon_Sword_019': 'Weapon_Sword_019', 'Weapon_Bow_027': 'Weapon_Bow_027'}
+    for w, as_user in {**weapons, 'Weapon_Sword_072': 'Dummy'}.items():
+        users = {u: w + u for u in USERS}
+        users.update(ASUser=as_user, ModelUser='Dummy' if w.endswith('072') else w + 'ModelUser')
+        files = [('Actor/ActorLink/%s.bxml' % w, actor_link(**users), 4), ('Actor/ModelList/%s.bmodellist' % w, b'ML', 4)]
+        if as_user != 'Dummy':  # a weapon with a skeleton: its held pose
+            files += [('Actor/ASList/%s.baslist' % w, as_list('Break', 'Equiped'), 4), ('Actor/AS/FileEquiped.bas', b'E', 4)]
+        put('Actor/Pack/%s.sbactorpack' % w, g.yaz0_literal(g.sarc_write(files)))
+    names = sorted([g.DONOR, g.LOOK, 'Zz', *g.PIECES.values(), *weapons, 'Weapon_Sword_072'], key=g.crc)
     actors = [{'name': n, 'bfres': n, 'instSize': 10, 'profile': 'NPC', 'aabbMin': {'X': -1.0}} for n in names]
     actors[names.index(g.LOOK)].update(mainModel='Link', bfres='Link', aabbMin={'X': -2.5})
     actors[names.index(g.DONOR)]['actorScale'] = 1.5  # (the monk is drawn bigger than Link)
@@ -85,6 +93,8 @@ def make_romfs(root):
     t.set('Actor/ASList/MenuASUser.baslist', 2000)
     t.set('Actor/GeneralParamList/MonkGParamUser.bgparamlist', 1000)
     t.set('Actor/AS/%s.bas' % g.IDLE_AS, 256)
+    for w in ('Weapon_Sword_019', 'Weapon_Bow_027'):
+        t.set('Actor/ASList/%s.baslist' % w, 900)
     t.names['Some/Collided.name'] = 7
     put('System/Resource/ResourceSizeTable.product.srsizetable', g.yaz0_literal(t.write()))
 
@@ -225,6 +235,28 @@ class Build(unittest.TestCase):
         files = {'Actor/ASList/Player.baslist': a.write(), 'Actor/AS/FileMove.bas': start.write(),
                  'Actor/AS/FileWait.bas': stop}
         self.assertEqual(g.player_clips(files), {'CoopClip_Move_1': 'WalkStart', 'CoopClip_Wait_0': 'WalkStop'})
+
+    def test_weapon_copies(self):
+        self.assertEqual(g.main(['--romfs', self.romfs, '--out', self.out, '--name', 'Ghost']), 0)
+        self.assertFalse(os.path.exists(os.path.join(self.out, 'Actor/Pack/CoopW_Sword_072.sbactorpack')))  # no model
+        info = g.TypedByml(self.read('Actor/ActorInfo.product.sbyml')).parse()
+        by_name = {a['name']: a for a in info['Actors']}
+        self.assertEqual([h & 0xFFFFFFFF for h in info['Hashes']], [g.crc(a['name']) for a in info['Actors']])
+        t = g.Rstb(self.read('System/Resource/ResourceSizeTable.product.srsizetable'))
+        for copy, weapon, as_user in (('CoopW_Sword_001', 'Weapon_Sword_001', 'Ghost'),
+                                      ('CoopW_Bow_027', 'Weapon_Bow_027', 'Ghost'),
+                                      ('CoopW_Sword_019', 'Weapon_Sword_019', 'CoopW_Sword_019')):
+            files = {n: b for n, b, _ in g.sarc_read(self.read('Actor/Pack/%s.sbactorpack' % copy))}
+            users = {k: v[2] for k, v in g.link_target(g.Aamp(files['Actor/ActorLink/%s.bxml' % copy])).items()}
+            self.assertEqual((users['ModelUser'], users['ASUser'], users['AIProgramUser'], users['PhysicsUser']),
+                             (weapon + 'ModelUser', as_user, 'MonkAIProgramUser', 'Dummy'))
+            self.assertEqual((by_name[copy]['bfres'], by_name[copy]['instSize']), (weapon, g.INST_SIZE))
+            self.assertGreaterEqual(t.get('Actor/Pack/%s.bactorpack' % copy), 64 << 10)
+            self.assertIn('Actor/ASList/%s.baslist' % as_user, files)
+        seq = {p[0][2]: p[1][2] for _, p in g.Aamp(files['Actor/ASList/CoopW_Sword_019.baslist']).objects()}
+        self.assertEqual(seq, {'Break': 'FileBreak', 'Equiped': 'FileEquiped', 'Wait': 'FileEquiped'})
+        self.assertIn('Actor/AS/FileEquiped.bas', files)
+        self.assertGreater(t.get('Actor/ASList/CoopW_Sword_019.baslist'), 900)
 
     def test_ghost_aslist_contains_playable_locomotion(self):
         self.assertEqual(g.main(['--romfs', self.romfs, '--out', self.out]), 0)

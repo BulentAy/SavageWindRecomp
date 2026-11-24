@@ -1,7 +1,7 @@
 // Co-op ghost. SAVAGEWIND_COOP_TEST=local: local proof of the pose and actor ABI, no transport. With networking
 // (runtime/coop_net.c) the first remote peer's pose drives one ghost actor. SAVAGEWIND_COOP_ACTOR=<name> picks the
 // actor (local default: a stock NPC; network default: CoopPlayer, which tools/coop_ghost_assets.py builds into a
-// SAVAGEWIND_ROMFS_OVERLAY folder, with its hair as a separate actor CoopPlayerHair).
+// SAVAGEWIND_ROMFS_OVERLAY folder, with its hair and clothes as separate actors CoopPlayer<piece>).
 #include "coop.h"
 #include "coop_net.h"
 #include "control_mem.h"
@@ -50,8 +50,8 @@ static struct {
 enum { SAMPLES = 8, DELAY_MS = 120, MIN_GAP_MS = 50, STALE_MS = 2000, RANGE_M = 120, MAX_SPAWNS = 8, LOG_EVERY = 6 };
 enum Ghost { GHOST_NONE, GHOST_PENDING, GHOST_ALIVE };
 // The ghost's worn pieces (tools/coop_ghost_assets.py PIECES): optional actors placed and animated with it.
-enum { PIECES = 1 };
-static const char *const piece_names[PIECES] = {"Hair"};
+enum { PIECES = 3 };
+static const char *const piece_names[PIECES] = {"Hair", "Upper", "Lower"};
 static const char *const sequences[] = {
     "Wait", "CoopWalk", "CoopRun", "CoopSprint", "CoopJump", "CoopFall", "CoopClimb", "CoopClimbWait",
     "CoopSwim", "CoopSwimWait", "CoopGlide",

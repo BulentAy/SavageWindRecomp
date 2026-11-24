@@ -8,8 +8,8 @@ then run the game with SAVAGEWIND_ROMFS_OVERLAY=<out> SAVAGEWIND_COOP_TEST=local
 The actor is the Sheikah monk's actor pack (Npc_DungeonPriest001: an NPC that just stands and waits) whose ActorLink
 takes the pause-menu Link's model and size (PauseMenuPlayer), an animation list of its own (the menu Link's, plus the
 "Wait" sequence the monk's AI plays, as Link's own standing clip) plus locomotion clips and no physics, attention,
-chemistry or effects (users set to Dummy): a Link that is drawn and nothing touches. Like the player's own hair, the
-ghost's is a separate actor built the same way from a worn piece's pack (model only, the ghost's
+chemistry or effects (users set to Dummy): a Link that is drawn and nothing touches. Like the player's own hair and
+clothes, the ghost's are separate actors built the same way from the worn pieces' packs (model only, the ghost's
 sequences), which the game places and animates together with it. Files written:
 
     Actor/Pack/<name>.sbactorpack                      the new pack (the monk's and the menu Link's resources)
@@ -45,8 +45,8 @@ LOCOMOTION = {
 DUMMY = ('PhysicsUser', 'AttentionUser', 'ChemicalUser', 'ElinkUser', 'SlinkUser', 'XlinkUser')
 # ActorInfo keys describing the model (the rest stays the monk's)
 MODEL_KEYS = ('bfres', 'mainModel', 'boundingForTraverse', 'aabbMin', 'aabbMax', 'actorScale')
-# worn pieces, actor <name><key>: a bare head's hair (Link's own)
-PIECES = {'Hair': 'Armor_Default_Head'}
+# worn pieces, actor <name><key>: a bare head's hair (Link's own), Champion's Tunic, Hylian Trousers
+PIECES = {'Hair': 'Armor_Default_Head', 'Upper': 'Armor_148_Upper', 'Lower': 'Armor_001_Lower'}
 INST_SIZE = 700000      # actor heap; the monk's is sized for its own model, Link's needs more
 TRAVERSE_DIST = 99999   # never unloaded for distance while it stands next to the player
 

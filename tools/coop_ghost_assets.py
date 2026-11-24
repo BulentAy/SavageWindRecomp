@@ -534,6 +534,8 @@ def build(romfs, out_dir, name):
         size = base * rsize(now) // rsize(was) + 1024
         if rel.startswith('Actor/Pack/'):
             size = max(size, 2 * rsize(now), 64 << 10)
+        elif rel.startswith('Actor/AS/'):
+            size = max(size, 4096)  # Tiny BAS files still allocate an animation parser and nodes.
         table.set(rel, size)
         sizes[rel] = size
     info_path = 'Actor/ActorInfo.product.byml'

@@ -68,7 +68,7 @@ def make_romfs(root):
     t.set('Actor/Pack/%s.bactorpack' % g.DONOR, 5000)
     t.set('Actor/ActorLink/%s.bxml' % g.DONOR, 1000)
     t.set('Actor/ASList/MenuASUser.baslist', 2000)
-    t.set('Actor/AS/%s.bas' % g.IDLE[1], 2000)
+    t.set('Actor/AS/%s.bas' % g.IDLE[1], 256)
     t.names['Some/Collided.name'] = 7
     put('System/Resource/ResourceSizeTable.product.srsizetable', g.yaz0_literal(t.write()))
 
@@ -193,8 +193,7 @@ class Build(unittest.TestCase):
             path = 'Actor/AS/' + seq[name] + '.bas'
             self.assertEqual([x[2] for _, p in g.Aamp(pack[path]).objects() for x in p],
                              [struct.pack('<i', 67), clip])
-            self.assertGreater(rstb.get(path),
-                               len(pack[path]))
+            self.assertGreaterEqual(rstb.get(path), 4096)  # The AS parser needs a fixed allocation budget.
 
     def test_refuses_out_inside_romfs(self):
         with self.assertRaises(SystemExit):

@@ -27,8 +27,8 @@ def as_list(*names):
     return a.write()
 
 
-def actor_link(**users):
-    obj = [g.crc('LinkTarget'), [param(k, 20, v) for k, v in users.items()]]
+def actor_link(scale=1.0, **users):
+    obj = [g.crc('LinkTarget'), [param(k, 20, v) for k, v in users.items()] + [param('ActorScale', 2, struct.pack('<f', scale))]]
     tags = [g.crc('Tags'), [param('Tag0', 20, 'Npc')]]
     scale = [g.crc('Scale'), [param('Value', 1, struct.pack('<f', 1.0)), param('Raw', 19, b'\1\2\3')]]
     a = g.Aamp.__new__(g.Aamp)
@@ -48,7 +48,7 @@ def make_romfs(root):
             f.write(data)
 
     donor = g.sarc_write([
-        ('Actor/ActorLink/%s.bxml' % g.DONOR, actor_link(**{u: 'Monk' + u for u in USERS}), 4),
+        ('Actor/ActorLink/%s.bxml' % g.DONOR, actor_link(1.5, **{u: 'Monk' + u for u in USERS}), 4),
         ('Actor/AIProgram/Wait.baiprog', b'AI' * 10, 8),
         ('Actor/Shared.bin', b'monk', 4)])
     look = g.sarc_write([
@@ -62,6 +62,7 @@ def make_romfs(root):
     names = sorted([g.DONOR, g.LOOK, 'Zz'], key=g.crc)
     actors = [{'name': n, 'bfres': n, 'instSize': 10, 'profile': 'NPC', 'aabbMin': {'X': -1.0}} for n in names]
     actors[names.index(g.LOOK)].update(mainModel='Link', bfres='Link', aabbMin={'X': -2.5})
+    actors[names.index(g.DONOR)]['actorScale'] = 1.5  # (the monk is drawn bigger than Link)
     hashes = [g.crc(n) if g.crc(n) < 1 << 31 else g.U32(g.crc(n)) for n in names]
     put('Actor/ActorInfo.product.sbyml', g.yaz0_literal(g.byml_write({'Actors': actors, 'Hashes': hashes}, 2)))
     t = g.Rstb(b'RSTB' + bytes(8))
@@ -161,6 +162,7 @@ class Build(unittest.TestCase):
                          [['Alpha', 'FileAlpha'], [g.IDLE[0], g.IDLE[1]], ['Zulu', 'FileZulu']])
         self.assertIn('Actor/ASList/MenuASUser.baslist', pack)
         self.assertEqual(users['AIProgramUser'], 'MonkAIProgramUser')
+        self.assertEqual(users['ActorScale'], struct.pack('<f', 1.0))  # Link's size, not the monk's
         for k in g.DUMMY:
             self.assertEqual(users[k], 'Dummy')
 
@@ -172,6 +174,7 @@ class Build(unittest.TestCase):
         self.assertEqual((ghost['bfres'], ghost['mainModel'], ghost['aabbMin'], ghost['profile']),
                          ('Link', 'Link', {'X': -2.5}, 'NPC'))
         self.assertEqual((ghost['instSize'], ghost['traverseDist']), (g.INST_SIZE, g.TRAVERSE_DIST))
+        self.assertNotIn('actorScale', ghost)
 
         t = g.Rstb(self.read('System/Resource/ResourceSizeTable.product.srsizetable'))
         self.assertEqual(t.get('Some/Collided.name'), 7)
